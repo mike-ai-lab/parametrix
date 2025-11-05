@@ -1,0 +1,14 @@
+{
+  "length": "1200;1500",
+  "height": "300;400;500",
+  "thickness": 15.0,
+  "joint_length": 2.0,
+  "joint_width": 2.0,
+  "pattern_type": "stack_bond",
+  "layout_start_direction": "bottom",
+  "start_row_height_index": 1,
+  "randomize_lengths": false,
+  "randomize_heights": false,
+  "cavity_distance": 30.0,
+  "color_name": "V121-PANEL"
+}

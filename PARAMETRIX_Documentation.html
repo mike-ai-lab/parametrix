@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PARAMETRIX Extension - User Documentation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; line-height: 1.6; color: #000; background: #fff; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { background: #4a5568; color: white; padding: 40px 0; text-align: center; margin-bottom: 40px; }
+        .header h1 { font-size: 3rem; margin-bottom: 10px; font-weight: 700; }
+        .header p { font-size: 1.2rem; opacity: 0.9; }
+        .section { background: white; margin-bottom: 30px; padding: 30px; border: 1px solid #e2e8f0; }
+        .section h2 { color: #000; font-size: 2rem; margin-bottom: 20px; border-bottom: 3px solid #2563eb; padding-bottom: 10px; }
+        .section h3 { color: #4a5568; font-size: 1.4rem; margin: 25px 0 15px 0; }
+        .section h4 { color: #4a5568; font-size: 1.1rem; margin: 20px 0 10px 0; font-weight: 600; }
+        .media-container { background: #f8fafc; border: 2px dashed #cbd5e0; padding: 40px; text-align: center; margin: 20px 0; min-height: 200px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 20px 0; }
+        .feature-card { background: #f8fafc; padding: 20px; border-left: 4px solid #2563eb; }
+        .feature-card h4 { color: #2563eb; margin-bottom: 10px; }
+        .parameter-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        .parameter-table th, .parameter-table td { padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+        .parameter-table th { background: #f8fafc; font-weight: 600; color: #000; }
+        .parameter-table tr:hover { background: #f8fafc; }
+        .code { background: #f8fafc; padding: 2px 6px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; }
+        .warning { background: #f8fafc; border: 1px solid #4a5568; color: #000; padding: 15px; margin: 15px 0; }
+        .tip { background: #f8fafc; border: 1px solid #2563eb; color: #000; padding: 15px; margin: 15px 0; }
+        .workflow-step { background: #f8fafc; border-left: 4px solid #2563eb; padding: 20px; margin: 15px 0; }
+        .workflow-step h4 { color: #2563eb; margin-bottom: 10px; }
+        .toc { background: #f8fafc; padding: 20px; border: 1px solid #e2e8f0; margin-bottom: 30px; }
+        .toc ul { list-style: none; }
+        .toc li { margin: 8px 0; }
+        .toc a { color: #2563eb; text-decoration: none; }
+        .toc a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="container">
+            <h1>PARAMETRIX Extension</h1>
+            <p>Professional Parametric Cladding Layout Generator for SketchUp</p>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Table of Contents -->
+        <div class="toc">
+            <h3>Table of Contents</h3>
+            <ul>
+                <li><a href="#overview">1. Overview</a></li>
+                <li><a href="#installation">2. Installation & Setup</a></li>
+                <li><a href="#interface">3. User Interface Guide</a></li>
+                <li><a href="#workflow">4. Workflow Guide</a></li>
+                <li><a href="#advanced">5. Advanced Features</a></li>
+            </ul>
+        </div>
+
+        <!-- Overview Section -->
+        <div class="section" id="overview">
+            <h2>1. Overview</h2>
+            <p>PARAMETRIX is a professional SketchUp extension designed for architects, designers, and construction professionals who need to create precise parametric cladding layouts. The extension generates complex multi-face layouts with advanced trimming, rail systems, and pattern synchronization.</p>
+            
+            <div class="media-container">
+                <img src="images/layouts_samples.png" alt="PARAMETRIX Layout Samples" style="max-width: 100%; height: auto;" />
+                <p style="margin-top: 10px; font-size: 0.9em; color: #6b7280;">Comprehensive layout samples showcasing the extension's versatility beyond basic stone layouts</p>
+            </div>
+
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h4>Multi-Face Layouts</h4>
+                    <p>Generate synchronized layouts across multiple selected faces with seamless pattern continuation.</p>
+                </div>
+                <div class="feature-card">
+                    <h4>Advanced Trimming</h4>
+                    <p>Automatic boolean trimming ensures perfect fit within complex face boundaries.</p>
+                </div>
+                <div class="feature-card">
+                    <h4>Rail Systems</h4>
+                    <p>Integrated top and bottom rail generation with customizable dimensions and materials.</p>
+                </div>
+                <div class="feature-card">
+                    <h4>Pattern Control</h4>
+                    <p>Running bond and stack bond patterns with randomization and start position control.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Installation Section -->
+        <div class="section" id="installation">
+            <h2>2. Installation & Setup</h2>
+            
+            <div class="workflow-step">
+                <h4>Installation</h4>
+                <p>Install the <span class="code">PARAMETRIX.rbz</span> file through SketchUp's Extension Manager (Window > Extension Manager > Install Extension). The PARAMETRIX toolbar will appear automatically after installation.</p>
+            </div>
+
+            <div class="tip">
+                <strong>Tip:</strong> The extension is also accessible through Extensions > PARAMETRIX Layout Generator menu item.
+            </div>
+        </div>
+
+        <!-- Interface Guide -->
+        <div class="section" id="interface">
+            <h2>3. User Interface Guide</h2>
+
+            <div class="media-container">
+                <video controls style="max-width: 100%; height: auto;">
+                    <source src="images/overview_layout_gen_compressed.mp4" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+                <p style="margin-top: 10px; font-size: 0.9em; color: #6b7280;">Complete workflow demonstration: Layout generation with dialog settings and preset saving</p>
+            </div>
+
+            <h3>3.1 Quick Presets Section</h3>
+            <table class="parameter-table">
+                <tr>
+                    <th>Control</th>
+                    <th>Function</th>
+                </tr>
+                <tr>
+                    <td><strong>Preset Dropdown</strong></td>
+                    <td>Select from saved preset configurations</td>
+                </tr>
+                <tr>
+                    <td><strong>Load Preset Button</strong></td>
+                    <td>Apply the selected preset to all interface parameters</td>
+                </tr>
+                <tr>
+                    <td><strong>Preset Name Field</strong></td>
+                    <td>Enter name for saving current parameter configuration as new preset</td>
+                </tr>
+                <tr>
+                    <td><strong>Save Preset Button</strong></td>
+                    <td>Save current parameters as named preset for future use</td>
+                </tr>
+            </table>
+
+            <div class="media-container">
+                <video controls style="max-width: 100%; height: auto;">
+                    <source src="images/Presets_Feature.mp4" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+                <p style="margin-top: 10px; font-size: 0.9em; color: #6b7280;">Preset management workflow: Loading, modifying, and saving presets</p>
+            </div>
+
+            <h3>3.2 Layout Mode Tabs</h3>
+            <table class="parameter-table">
+                <tr>
+                    <th>Mode</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <td><strong>Multi-Row Layout</strong></td>
+                    <td>Creates multiple rows of panels with varying heights and full pattern control</td>
+                </tr>
+                <tr>
+                    <td><strong>Single-Row Layout</strong></td>
+                    <td>Generates single horizontal row with custom height, disables height randomization</td>
+                </tr>
+            </table>
+
+            <div class="media-container">
+                <img src="images/single_row_mode_samples.png" alt="Single Row Mode Examples" style="max-width: 100%; height: auto;" />
+                <p style="margin-top: 10px; font-size: 0.9em; color: #6b7280;">Single-row layout examples showing rail options, cavity distance, and corner connections</p>
+            </div>
+
+            <h3>3.3 Key Parameters</h3>
+            <table class="parameter-table">
+                <tr>
+                    <th>Parameter</th>
+                    <th>Format</th>
+                    <th>Function</th>
+                </tr>
+                <tr>
+                    <td><strong>Panel Lengths</strong></td>
+                    <td>800;900;1000</td>
+                    <td>Semicolon-separated list of panel widths in current units</td>
+                </tr>
+                <tr>
+                    <td><strong>Panel Heights</strong></td>
+                    <td>100;200;300</td>
+                    <td>Semicolon-separated list of panel heights in current units</td>
+                </tr>
+                <tr>
+                    <td><strong>Pattern Type</strong></td>
+                    <td>Running Bond / Stack Bond</td>
+                    <td>Running Bond offsets alternate rows by 50%, Stack Bond aligns all panels vertically</td>
+                </tr>
+                <tr>
+                    <td><strong>Randomize Options</strong></td>
+                    <td>Checkboxes</td>
+                    <td>Randomly selects from length/height lists instead of sequential pattern</td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- Workflow Guide -->
+        <div class="section" id="workflow">
+            <h2>4. Workflow Guide</h2>
+
+            <h3>4.1 Basic Workflow</h3>
+            <div class="workflow-step">
+                <h4>Step 1: Select Face(s)</h4>
+                <p>Select one or more faces in SketchUp where you want to apply the cladding layout.</p>
+            </div>
+
+            <div class="workflow-step">
+                <h4>Step 2: Launch Extension</h4>
+                <p>Click the PARAMETRIX toolbar button or use Extensions > PARAMETRIX Layout Generator.</p>
+            </div>
+
+            <div class="workflow-step">
+                <h4>Step 3: Configure Parameters</h4>
+                <p>Set panel dimensions, joints, and pattern preferences. Use Preview Layout to test settings.</p>
+            </div>
+
+            <div class="workflow-step">
+                <h4>Step 4: Generate Final Layout</h4>
+                <p>Click Generate Layout to create the final geometry with automatic trimming.</p>
+            </div>
+
+            <h3>4.2 Multi-Face Layouts</h3>
+            <p>For complex buildings, select multiple faces and enable "Synchronize Patterns" and "Preserve Corners" for seamless multi-face layouts with proper corner connections.</p>
+        </div>
+
+        <!-- Advanced Features -->
+        <div class="section" id="advanced">
+            <h2>5. Advanced Features</h2>
+
+            <h3>5.1 Boolean Trimming System</h3>
+            <p>The extension automatically trims generated panels to fit within complex face boundaries, including faces with holes or irregular shapes.</p>
+
+            <h3>5.2 Rail Systems</h3>
+            <p>Integrated top and bottom rail generation with options for continuous or split rails, customizable dimensions, and separate materials.</p>
+
+            <h3>5.3 Pattern Synchronization</h3>
+            <p>When multiple faces are selected, the extension can synchronize patterns across faces for seamless architectural continuity.</p>
+
+            <div class="tip">
+                <strong>Professional Tip:</strong> The generated components maintain proper 2D behavior and can cut openings in walls and other geometry.
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="text-align: center; padding: 40px 0; color: #4a5568; border-top: 1px solid #e2e8f0; margin-top: 40px;">
+            <p>PARAMETRIX Extension - Professional Parametric Cladding Layout Generator</p>
+            <p style="font-size: 0.9em; opacity: 0.7; margin-top: 5px;">Developed by: Int. Arch. M.Shkeir</p>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,1 @@
+create a strong loader that clears the cached versions and loads the most recent, updates the menu item, the toolbar, and the add a unique identifier always when u provide a new update, never without a unique identifier, start with P-5 on the menu item name, the dialog box below the title, and the console log, and provide me with the loading command of the loader

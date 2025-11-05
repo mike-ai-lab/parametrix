@@ -1,0 +1,14 @@
+{
+  "length": "800;900;1000",
+  "height": "100;200",
+  "thickness": 20.0,
+  "joint_length": 3.0,
+  "joint_width": 3.0,
+  "pattern_type": "running_bond",
+  "layout_start_direction": "bottom_left",
+  "start_row_height_index": 1,
+  "randomize_lengths": true,
+  "randomize_heights": false,
+  "cavity_distance": 50.0,
+  "color_name": "V121-BRICK"
+}
