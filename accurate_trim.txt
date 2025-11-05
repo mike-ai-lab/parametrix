@@ -1,0 +1,32 @@
+# Get the active model and selection
+model = Sketchup.active_model
+selection = model.selection
+
+# Ensure two items are selected and are solid groups/components
+if selection.length == 2
+  target = selection[0] # The object to be trimmed
+  trimmer = selection[1] # The object that will do the trimming
+
+  if target.manifold? && trimmer.manifold?
+    # Start an undo operation for better user experience
+    model.start_operation("Trim Complex Model")
+
+    # Perform the trim operation
+    # The 'trim' method uses the second solid to cut away from the first
+    # and leaves both objects in the model.
+    result = trimmer.trim(target)
+
+    if result
+      puts "#{target} successfully trimmed with #{trimmer}"
+    else
+      puts "Error trimming #{target} with #{trimmer}"
+    end
+
+    # Commit the undo operation
+    model.commit_operation
+  else
+    UI.messagebox("Both objects must be solid groups or components for the trim operation to work.")
+  end
+else
+  UI.messagebox("Please select exactly two solid objects (group or component) to trim.")
+end
