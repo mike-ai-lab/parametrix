@@ -1,0 +1,406 @@
+The problem you've identified is a classic challenge in parametric layout generation: relying solely on bounding box calculations fails to respect complex polygon boundaries, leading to elements that float outside or over voids. Your existing `trimming_v3.txt` module, specifically `PARAMETRIX_TRIMMING.boolean2d_exact`, is perfectly designed to solve this. The issue lies in its integration and how the layout `face_group` is managed, especially concerning the `@@use_flat_grouping` setting.
+
+The core of the solution involves ensuring that:
+1.  Each face's generated elements are contained within a dedicated, temporary group.
+2.  This temporary group is passed to the `boolean2d_exact` method along with the original complex `Sketchup::Face` acting as the trimming boundary.
+3.  The result of the trimming (a new component instance containing the clipped elements) is then correctly re-integrated into the main `layout_group`, either by exploding its contents for a "flat" structure or by retaining it as a nested component.
+
+Let's implement these changes.
+
+---
+
+### Actionable Solutions
+
+You will need to modify `loader.txt` and `layout_engine.txt`. The `trimming_v3.txt` module does not require changes; its `boolean2d_exact` method is robust enough as is, as `Sketchup::Face` objects provide their vertex positions in model space, making the `face_matrix` argument redundant for the cloning process within `boolean2d_exact`.
+
+---
+
+#### 1. Modify `loader.txt`
+
+The `trimming_v3.rb` file needs to be explicitly loaded by the extension loader.
+
+**File: `loader.txt`**
+
+```ruby
+# PARAMETRIX Strong Loader P-24
+# Entry point with cache clearing and forced reload
+
+module PARAMETRIX
+  def self.force_reload
+    puts "[PARAMETRIX P-24] Force reloading all modules..."
+    
+    # Clear module constants to force reload
+    if defined?(PARAMETRIX)
+      PARAMETRIX.constants.each do |const|
+        PARAMETRIX.send(:remove_const, const) if PARAMETRIX.const_defined?(const)
+      end
+    end
+    
+    # Remove from loaded features to force fresh load
+    base_dir = File.dirname(__FILE__)
+    files_to_reload = [
+      'core.rb', 'preset_manager.rb', 'multi_face_position.rb', 
+      'ui_dialog_newui.rb', 'layout_engine.rb', 'commands.rb', 'toolbar.rb',
+      'trimming_v3.rb' # ADDED THIS LINE
+    ]
+    
+    files_to_reload.each do |file|
+      full_path = File.join(base_dir, file)
+      $LOADED_FEATURES.delete_if { |f| f.include?(file) }
+      load full_path if File.exist?(full_path)
+    end
+    
+    puts "[PARAMETRIX P-24] All modules reloaded successfully"
+  end
+  
+  LOADER_VERSION = "P-24"
+end
+
+# Force reload and load all components
+PARAMETRIX.force_reload
+
+require File.join(__dir__, 'core.rb')
+require File.join(__dir__, 'preset_manager.rb')
+require File.join(__dir__, 'multi_face_position.rb')
+require File.join(__dir__, 'ui_dialog_newui.rb')
+require File.join(__dir__, 'layout_engine.rb')
+require File.join(__dir__, 'commands.rb')
+require File.join(__dir__, 'toolbar.rb')
+require File.join(__dir__, 'trimming_v3.rb') # ADDED THIS LINE
+```
+
+---
+
+#### 2. Modify `layout_engine.txt`
+
+This is where the main logic changes for creating and trimming face-specific groups.
+
+**File: `layout_engine.txt`**
+
+```ruby
+# PARAMETRIX Layout Engine
+# Contains the main layout generation logic and unified layout processing
+
+module PARAMETRIX
+
+    def self.create_unified_layout_for_face(face_transform_data, layout_group, rails_group, materials, unit_conversion, length_values, height_values, face_index, total_faces, cavity_distance_su, global_start_x, global_start_y, elements_x, elements_y, joint_length_su, joint_width_su, avg_length_su, avg_height_su, thickness_su, single_row_mode, layout_start_direction_for_single_row, is_preview = false, start_row_height_index = 1)
+    
+    face_data = face_transform_data[:face_data]
+    face = face_data[:face] # This is the original Sketchup::Face object selected by the user.
+    face_matrix = face_data[:matrix]
+    face_transform = face_transform_data[:transform]
+    local_bounds = face_transform_data[:local_bounds]
+    corner_type = face_transform_data[:corner_type]
+    original_normal = face_transform_data[:original_normal]
+
+    vertex_count = face.outer_loop.vertices.length
+    face_type = vertex_count == 4 ? "RECTANGULAR" : "COMPLEX (#{vertex_count} sides)"
+    
+    # --- START MODIFICATION ---
+    # Always create a temporary group for individual face layout.
+    # This ensures that each face's layout can be trimmed independently.
+    # The elements will then either remain in this sub-group (nested) or be exploded
+    # into the main layout_group (flat) after trimming.
+    face_sub_group = layout_group.entities.add_group
+    face_sub_group.name = "Parametrix_Face_Layout_Temp_#{face_index + 1}"
+    
+    # All piece creation logic will now add entities to face_sub_group
+    # We will set `face_group` to `face_sub_group` for consistency with existing code's intent
+    # in the piece creation helper `create_piece_with_ghosting`.
+    face_group = face_sub_group 
+    # --- END MODIFICATION ---
+
+    element_count = 0
+    trimmed_count = 0
+    piece_index = 0
+
+    # Initialize randomization seeds for this face
+    if @@synchronize_patterns
+      # Reset seeds at the start of each face to ensure synchronization
+      @current_length_seed = @global_length_seed || 12345
+      @current_height_seed = @global_height_seed || 54321
+    end
+
+    pos_y = global_start_y 
+    current_height_su = avg_height_su # Default, will be updated
+    
+
+    stone_min_y_for_rails = Float::INFINITY
+    stone_max_y_for_rails = -Float::INFINITY
+    stone_min_x_for_rails = Float::INFINITY
+    stone_max_x_for_rails = -Float::INFINITY
+    top_row_joint_positions = []
+    bottom_row_joint_positions = []
+    
+    # Initialize rail bounds based on layout bounds
+    initial_stone_min_y = local_bounds.min.y
+    initial_stone_max_y = local_bounds.max.y
+
+    # Override vertical positioning for single-row mode
+    if single_row_mode
+      current_height_su = height_values[0] * unit_conversion # User-specified height
+      
+      bottom_rail_thickness_su = @@enable_bottom_rail ? @@bottom_rail_thickness * unit_conversion : 0.0
+      top_rail_thickness_su = @@enable_top_rail ? @@top_rail_thickness * unit_conversion : 0.0
+      
+      # Calculate the effective vertical boundaries for the single row, considering rails and joints
+      effective_min_y = local_bounds.min.y + bottom_rail_thickness_su + joint_width_su
+      effective_max_y = local_bounds.max.y - top_rail_thickness_su - joint_width_su
+      
+      available_vertical_space = effective_max_y - effective_min_y
+
+      # Ensure the custom height doesn't exceed available space
+      if current_height_su > available_vertical_space
+        current_height_su = available_vertical_space
+      end
+
+      # Determine the starting Y position (bottom of the row) based on layout_start_direction
+      case layout_start_direction_for_single_row # Use the specific layout_start_direction for single row
+      when "bottom_left", "bottom", "bottom_right"
+        pos_y = effective_min_y
+
+      when "top_left", "top", "top_right"
+        pos_y = effective_max_y - current_height_su
+
+      when "left", "right", "center"
+        pos_y = effective_min_y + (available_vertical_space - current_height_su) / 2.0
+
+      else # fallback to center
+        pos_y = effective_min_y + (available_vertical_space - current_height_su) / 2.0
+
+      end
+      
+      # Store the actual stone bounds for rail placement - FIXED: Use actual stone positions
+      stone_min_y_for_rails = pos_y
+      stone_max_y_for_rails = pos_y + current_height_su
+      # Initialize X bounds for single row mode
+      stone_min_x_for_rails = local_bounds.min.x
+      stone_max_x_for_rails = local_bounds.max.x
+
+
+    else
+      # FIXED: height_index should start at 0 because height_values is already rotated
+      # The rotation happens in create_multi_face_unified_layout via get_height_values_with_start_index
+      # So we always start from index 0 of the already-rotated array
+      height_index = 0 # Only used in multi-row mode
+      # Initialize with local bounds - will be updated as stones are placed
+      stone_min_y_for_rails = initial_stone_max_y  # Start high, will be lowered
+      stone_max_y_for_rails = initial_stone_min_y  # Start low, will be raised
+      stone_min_x_for_rails = local_bounds.max.x   # Start high, will be lowered
+      stone_max_x_for_rails = local_bounds.min.x   # Start low, will be raised
+    end
+
+
+
+    # Generate layout using GLOBAL start position (no limits)
+    for row in 0...elements_y
+
+      unless single_row_mode # Only apply height pattern logic for multi-row mode
+        if height_values.length > 1 && @@randomize_heights
+          # Use dedicated height seed for synchronization
+          if @@synchronize_patterns
+            srand(@current_height_seed + row)
+          end
+          current_height = height_values[rand(height_values.length)]
+        elsif height_values.length > 1
+          current_height = height_values[height_index % height_values.length]
+          if row == 0
+            puts "[PARAMETRIX] Row 0 - Using height_index=#{height_index}, height_values[#{height_index % height_values.length}]=#{current_height}, Full pattern=[#{height_values.join(', ')}]"
+            puts "BOTTOM_ROW_HEIGHT: #{current_height}"
+          end
+          height_index += 1
+        else
+          current_height = height_values[0]
+        end
+        current_height_su = current_height * unit_conversion
+      end
+
+      row_offset = case @@pattern_type
+      when "running_bond"
+        (row % 2) * (avg_length_su + joint_length_su) * 0.5
+      else
+        0.0
+      end
+
+      row_start_x = global_start_x + row_offset
+      pos_x = row_start_x
+      length_index = 0
+
+      # Pre-calculate row pieces with gap filling
+      row_pieces = []
+      temp_pos_x = pos_x
+      temp_length_index = length_index
+      
+      # Generate initial pieces for this row
+      for col in 0...elements_x
+        if length_values.length > 1 && (single_row_mode ? @@single_row_randomize_lengths : @@randomize_lengths)
+          # Use dedicated length seed for synchronization
+          if @@synchronize_patterns
+            srand(@current_length_seed + row * 1000 + col)
+          end
+          current_length = length_values[rand(length_values.length)]
+        elsif length_values.length > 1
+          current_length = length_values[temp_length_index % length_values.length]
+          temp_length_index += 1
+        else
+          current_length = length_values[0]
+        end
+        current_length_su = current_length * unit_conversion
+        
+        element_right = temp_pos_x + current_length_su
+        intersect_left = [temp_pos_x, local_bounds.min.x].max
+        intersect_right = [element_right, local_bounds.max.x].min
+        
+        if intersect_left < intersect_right
+          trimmed_width = intersect_right - intersect_left
+          row_pieces << {
+            pos_x: temp_pos_x,
+            length_su: current_length_su,
+            trimmed_width: trimmed_width,
+            intersect_left: intersect_left,
+            intersect_right: intersect_right
+          }
+        end
+        
+        temp_pos_x += current_length_su + joint_length_su
+        break if temp_pos_x >= local_bounds.max.x + avg_length_su
+      end
+      
+      # Apply minimum piece constraint with gap filling
+      min_piece_su = @@enable_min_piece_length ? @@min_piece_length * unit_conversion : 0.0
+      if @@enable_min_piece_length && min_piece_su > 0.001
+        filtered_pieces = []
+        i = 0
+        while i < row_pieces.length
+          piece = row_pieces[i]
+          
+          if piece[:trimmed_width] < min_piece_su
+            # Small piece - extend adjacent piece to fill gap
+            gap_width = piece[:trimmed_width] + joint_length_su
+            
+            if i > 0 && filtered_pieces.length > 0
+              # Extend previous piece
+              prev_piece = filtered_pieces.last
+              prev_piece[:length_su] += gap_width
+              prev_piece[:intersect_right] += gap_width
+            elsif i < row_pieces.length - 1
+              # Extend next piece
+              next_piece = row_pieces[i + 1]
+              next_piece[:pos_x] -= gap_width
+              next_piece[:length_su] += gap_width
+              next_piece[:intersect_left] -= gap_width
+            end
+          else
+            filtered_pieces << piece
+          end
+          i += 1
+        end
+        row_pieces = filtered_pieces
+      end
+      
+      # Create actual pieces from processed row data
+      row_pieces.each do |piece_data|
+        element_top = pos_y + current_height_su
+        intersect_bottom = [pos_y, local_bounds.min.y].max
+        intersect_top = [element_top, local_bounds.max.y].min
+        
+        if piece_data[:intersect_left] < piece_data[:intersect_right] && intersect_bottom < intersect_top
+          trimmed_width = piece_data[:intersect_right] - piece_data[:intersect_left]
+          trimmed_height = intersect_top - intersect_bottom
+
+          if trimmed_width > 0.001 && trimmed_height > 0.001
+            local_points = [
+              Geom::Point3d.new(piece_data[:intersect_left], intersect_bottom, 0),
+              Geom::Point3d.new(piece_data[:intersect_right], intersect_bottom, 0),
+              Geom::Point3d.new(piece_data[:intersect_right], intersect_top, 0),
+              Geom::Point3d.new(piece_data[:intersect_left], intersect_top, 0)
+            ]
+
+            world_points = local_points.map { |pt| pt.transform(face_transform) }
+
+            # Create the piece in the temporary face_sub_group
+            if create_piece_with_ghosting(face_group, world_points, materials, thickness_su, original_normal, piece_index, element_count, trimmed_count, is_preview)
+              element_count += 1
+            end
+          end
+        end
+      end
+
+      # Adjust pos_y for the next row (only for multi-row mode)
+      unless single_row_mode
+        pos_y += current_height_su + joint_width_su
+        if pos_y >= local_bounds.max.y + avg_height_su # Break if exceeding vertical bounds (AABB)
+          break
+        end
+      else
+        # Single-row mode only generates one row
+        break
+      end
+    end # End of for row loop
+
+    # --- START MODIFICATION: Trimming and final grouping logic after all pieces are generated ---
+    if !is_preview
+      if face_sub_group.entities.count > 0
+        puts "[PARAMETRIX] Applying 2D trimming for Face_#{face_index + 1}..."
+        
+        # Call the 2D boolean exact trimming function.
+        # The face_data[:face] is the original Sketchup::Face object.
+        # The `face_matrix` argument to `boolean2d_exact` is not used in the current trimming_v3 code,
+        # as SketchUp's `Sketchup::Face` object's `vertices.position` already returns model-space points.
+        trimmed_result = PARAMETRIX_TRIMMING.boolean2d_exact(face_sub_group, face_data[:face])
+        
+        if @@use_flat_grouping
+          # If flat grouping is enabled, explode the trimmed component/group.
+          # `explode` moves its contents to its parent (`layout_group.entities` in this case)
+          # and then removes the instance/group itself.
+          if trimmed_result.is_a?(Sketchup::ComponentInstance) || trimmed_result.is_a?(Sketchup::Group)
+            trimmed_result.explode 
+          end
+        else
+          # If nested grouping, `trimmed_result` is already the component instance 
+          # that replaced `face_sub_group`. Just rename it.
+          if trimmed_result.is_a?(Sketchup::ComponentInstance)
+            trimmed_result.name = "Face_#{face_index + 1}_Unified_#{corner_type.capitalize}"
+            trimmed_result.definition.name = "PARAMETRIX Layout Def - Face_#{face_index + 1}"
+          elsif trimmed_result.is_a?(Sketchup::Group) # Fallback if boolean2d_exact returns a Group
+            trimmed_result.name = "Face_#{face_index + 1}_Unified_#{corner_type.capitalize}"
+          end
+          # No need to add `trimmed_result` to `layout_group` explicitly,
+          # because `face_sub_group` (which was transformed into `trimmed_result`)
+          # was originally created inside `layout_group.entities`.
+        end
+      else
+        # No pieces generated for this face, remove the empty temporary group.
+        face_sub_group.erase! rescue nil
+      end
+    end
+    # --- END MODIFICATION ---
+    
+    # Calculate bounds for rails: The existing rail placement logic uses `initial_stone_min_y`,
+    # `local_bounds.min.x`, etc., which are based on the face's overall AABB. This might be desired
+    # for full-span rails, so we won't change it here. If rails also need to be clipped,
+    # that would be a separate feature.
+
+    # This return value is not currently used by calling methods, but keep for consistency.
+    element_count 
+  end # End of create_unified_layout_for_face method
+```
+
+---
+
+### Explanation of Changes
+
+1.  **`loader.txt` Update:** The `trimming_v3.rb` file is now included in the `files_to_reload` array and explicitly `require`d. This ensures the `PARAMETRIX_TRIMMING` module is available when `layout_engine` needs it.
+
+2.  **`layout_engine.txt` Modifications:**
+    *   **Dedicated `face_sub_group`:** At the beginning of `create_unified_layout_for_face`, instead of directly using `layout_group` or conditionally creating a nested group, a temporary `face_sub_group` is *always* created within the main `layout_group`. All subsequent calls to `create_piece_with_ghosting` are directed to this `face_sub_group`. This isolates the geometry for each individual face, making per-face trimming possible.
+    *   **Trimming Call:** After the main loop (`for row in 0...elements_y`) completes, and `is_preview` is false (meaning actual geometry generation), `PARAMETRIX_TRIMMING.boolean2d_exact(face_sub_group, face_data[:face])` is called.
+        *   `face_sub_group` is the group containing all the generated, unclipped pieces for the current face.
+        *   `face_data[:face]` is the original `Sketchup::Face` object that was selected. The `boolean2d_exact` method will use the precise geometry (outer loop and inner loops/holes) of this face to define the trimming boundary.
+    *   **Result Handling:**
+        *   The `boolean2d_exact` method converts the input `layout_group` (our `face_sub_group`) into a `Sketchup::ComponentInstance` and returns it.
+        *   If `@@use_flat_grouping` is `true`, the `trimmed_result` component instance is `explode`d. This action moves all the trimmed pieces directly into the parent `layout_group.entities`, achieving the "flat" grouping structure while ensuring each piece is clipped. The original component instance is removed.
+        *   If `@@use_flat_grouping` is `false`, the `trimmed_result` (which replaced the `face_sub_group` in `layout_group.entities`) is simply renamed to reflect the face it represents, maintaining the nested group structure.
+    *   **Empty Group Cleanup:** If no pieces are generated for a face, the temporary `face_sub_group` is erased to prevent empty groups from cluttering the model.
+
+These modifications ensure that all generated elements are geometrically constrained to the exact boundaries of the selected faces, correctly handling complex shapes and internal voids, and resolving the issue of elements floating outside the intended surface.
