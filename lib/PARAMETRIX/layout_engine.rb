@@ -297,7 +297,7 @@ module PARAMETRIX
 
 
     # Make groups solid if not preview
-    if !is_preview && face_group.respond_to?(:entities) && face_group.entities.length > 0
+    if !is_preview && face_group.respond_to?(:entities) && face_group.valid? && face_group.entities.length > 0
       face_group.entities.each { |e| e.make_unique if e.respond_to?(:make_unique) }
     end
     
@@ -314,11 +314,11 @@ module PARAMETRIX
       active_entities, context_name = get_proper_active_context
 
       if is_preview
-        puts "[PARAMETRIX] Creating preview with UNIFIED LAYOUT..."
+        puts "[PARAMETRIX P-24] Creating preview with UNIFIED LAYOUT..."
         remove_preview
       else
         model.start_operation("PARAMETRIX Layout", true)
-        puts "[PARAMETRIX] Creating UNIFIED layout..."
+        puts "[PARAMETRIX P-24] Creating UNIFIED layout..."
         remove_preview
       end
 
@@ -404,21 +404,21 @@ module PARAMETRIX
         rails_group = active_entities.add_group
         
         if is_preview
-          layout_group.name = "PARAMETRIX P-11 Preview Layout"
-          rails_group.name = "PARAMETRIX P-11 Preview Rails"
+          layout_group.name = "PARAMETRIX P-24 Preview Layout"
+          rails_group.name = "PARAMETRIX P-24 Preview Rails"
           @@preview_group = [layout_group, rails_group]
         else
-          layout_group.name = "PARAMETRIX P-11 Layout"
-          rails_group.name = "PARAMETRIX P-11 Rails"
+          layout_group.name = "PARAMETRIX P-24 Layout"
+          rails_group.name = "PARAMETRIX P-24 Rails"
         end
       else
         main_group = active_entities.add_group
         
         if is_preview
-          main_group.name = "PARAMETRIX P-11 Preview"
+          main_group.name = "PARAMETRIX P-24 Preview"
           @@preview_group = main_group
         else
-          main_group.name = "PARAMETRIX P-11 Layout"
+          main_group.name = "PARAMETRIX P-24 Layout"
         end
         
         layout_group = main_group
@@ -516,14 +516,14 @@ module PARAMETRIX
         model.commit_operation
       end
       
-      puts "[PARAMETRIX P-11] Layout completed: #{total_elements} elements created"
+      puts "[PARAMETRIX P-24] Layout completed: #{total_elements} elements created"
       puts "TEST: Direction=#{layout_start_direction_for_face}, HeightIndex=#{start_row_height_index_for_face} → Elements=#{total_elements}, BottomRowHeight=#{height_values[0]}"
 
       return 1
 
     rescue => e
-      puts "[PARAMETRIX P-11] Error in layout creation: #{e.message}"
-      puts "[PARAMETRIX P-11] Backtrace: #{e.backtrace.first(3).join('\n')}"
+      puts "[PARAMETRIX P-24] Error in layout creation: #{e.message}"
+      puts "[PARAMETRIX P-24] Backtrace: #{e.backtrace.first(3).join('\n')}"
       if !is_preview
         model.abort_operation if model
       end

@@ -1,9 +1,9 @@
-# PARAMETRIX Strong Loader P-11
+# PARAMETRIX Strong Loader P-24
 # Entry point with cache clearing and forced reload
 
 module PARAMETRIX
   def self.force_reload
-    puts "[PARAMETRIX P-11] Force reloading all modules..."
+    puts "[PARAMETRIX P-24] Force reloading all modules..."
     
     # Clear module constants to force reload
     if defined?(PARAMETRIX)
@@ -25,10 +25,10 @@ module PARAMETRIX
       load full_path if File.exist?(full_path)
     end
     
-    puts "[PARAMETRIX P-11] All modules reloaded successfully"
+    puts "[PARAMETRIX P-24] All modules reloaded successfully"
   end
   
-  LOADER_VERSION = "P-11"
+  LOADER_VERSION = "P-24"
 end
 
 # Force reload and load all components

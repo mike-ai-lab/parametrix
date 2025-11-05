@@ -3,7 +3,7 @@
 
 module PARAMETRIX
   
-  PARAMETRIX_EXTENSION_VERSION = "P-11"
+  PARAMETRIX_EXTENSION_VERSION = "P-24"
   
   # --- Multi-Row Layout Parameters ---
   @@length = "800;900;1000;1100;1200"
@@ -696,20 +696,18 @@ module PARAMETRIX
       elsif @@preview_group.valid?
         model.entities.erase_entities(@@preview_group)
       end
-      puts "[PARAMETRIX P-11] Previous preview removed"
+      puts "[PARAMETRIX P-24] Previous preview removed"
     end
     @@preview_group = nil
   end
 
   def self.create_piece_with_ghosting(face_group, world_points, materials, thickness_su, original_normal, piece_index, total_pieces, is_preview = false, original_face = nil, face_matrix = nil)
     begin
-      face_element = face_group.entities.add_face(world_points)
+      # Create individual solid group for each piece
+      piece_group = face_group.entities.add_group
+      face_element = piece_group.entities.add_face(world_points)
+      
       if face_element
-        # Store for later boolean trimming
-        face_element.set_attribute('PARAMETRIX_DATA', 'needs_trimming', original_face && original_face.outer_loop.vertices.length > 4)
-        face_element.set_attribute('PARAMETRIX_DATA', 'original_face', original_face) if original_face
-        face_element.set_attribute('PARAMETRIX_DATA', 'face_matrix', face_matrix) if face_matrix
-        
         if is_preview
           face_element.material = "#CCCCCC"
           face_element.back_material = "#CCCCCC"
@@ -724,10 +722,21 @@ module PARAMETRIX
             else
               pushpull_distance = thickness_su
             end
-            face_element.pushpull(pushpull_distance)
+            
+            # Pushpull to create solid
+            result = face_element.pushpull(pushpull_distance)
+            
+            # Ensure all faces have materials for solid appearance
+            piece_group.entities.each do |entity|
+              if entity.is_a?(Sketchup::Face)
+                entity.material = materials.first unless entity.material
+                entity.back_material = materials.first unless entity.back_material
+              end
+            end
           end
         end
         
+        piece_group.name = "Piece_#{piece_index + 1}"
         return true
       end
     rescue => e
@@ -1134,5 +1143,7 @@ module PARAMETRIX
     
     return rails_group
   end
+  
+
 
 end

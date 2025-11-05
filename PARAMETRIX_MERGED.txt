@@ -1,0 +1,3058 @@
+PARAMETRIX EXTENSION - MERGED FILE
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\commands.rb
+
+# PARAMETRIX Commands
+
+module PARAMETRIX
+
+  PARAMETRIX_COMMANDS_VERSION = "P-24"
+
+  def self.start_layout_process
+    puts "[PARAMETRIX P-24] Starting layout process..."
+    model = Sketchup.active_model
+    selection = model.selection
+
+    if selection.empty?
+      UI.messagebox("Please select one or more faces to create layout.")
+      return
+    end
+
+    faces_data = analyze_multi_face_selection(selection)
+
+    if faces_data.empty?
+      UI.messagebox("No valid faces found in selection.", "PARAMETRIX")
+      return
+    end
+
+    unless validate_faces_for_processing(faces_data)
+      UI.messagebox("Selected faces are not suitable for processing.")
+      return
+    end
+
+    multi_face_position = CladzPARAMETRIXMultiFacePosition.new
+
+    faces_data.each do |data|
+      multi_face_position.add_face(data[:face], data[:matrix])
+    end
+
+    show_html_dialog(multi_face_position)
+  end
+
+end
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\core.rb
+
+# PARAMETRIX Core Module
+# Contains module definitions, constants, and global configuration
+
+module PARAMETRIX
+  
+  PARAMETRIX_EXTENSION_VERSION = "P-24"
+  
+  # --- Multi-Row Layout Parameters ---
+  @@length = "800;900;1000;1100;1200"
+  @@height = "100;200;300"
+  @@thickness = 20.0
+  @@joint_length = 3.0
+  @@joint_width = 3.0
+  @@color_name = "PARAMETRIX-LAYOUT"
+  @@pattern_type = "running_bond"
+  @@manual_unit = "auto"
+  @@layout_start_direction = "center"
+  @@start_row_height_index = 1
+  @@randomize_lengths = true
+  @@randomize_heights = false
+  @@enable_min_piece_length = true
+  @@min_piece_length = 300.0
+  @@multi_face_mode = true # Always true for unified layout
+  @@remove_small_pieces = false # DISABLED: Reactive removal causes gaps. Use proactive adjustment instead.
+  @@synchronize_patterns = true
+  @@unified_material = true # Not currently used in this version, but kept for future
+  @@cavity_distance = 50.0
+  @@force_horizontal_layout = true
+  @@preserve_corners = true
+  @@use_flat_grouping = false
+
+  # --- Single-Row Layout Parameters (NEW) ---
+  @@single_row_mode = false # Moved to Advanced tab
+  @@single_row_length = "1000" # Default length for single row
+  @@single_row_height = "620" # Default height for single row (was @@single_row_custom_height)
+  @@single_row_thickness = 20.0
+  @@single_row_joint_length = 3.0
+  @@single_row_joint_width = 3.0
+  @@single_row_cavity_distance = 50.0
+  @@single_row_pattern_type = "running_bond"
+  @@single_row_randomize_lengths = false # New setting for single row
+  @@single_row_min_piece_length = 300.0
+
+  def self.filter_and_extend_pieces(pieces, min_piece_su, joint_length_su)
+    # Remove pieces below minimum and extend adjacent pieces
+    return pieces if pieces.empty? || min_piece_su <= 0
+    
+    filtered_pieces = []
+    current_extension = 0.0
+    
+    pieces.each_with_index do |piece, index|
+      piece_length = piece[:length]
+      
+      if piece_length < min_piece_su
+        # Mark this piece for removal and accumulate its length
+        current_extension += piece_length + joint_length_su
+      else
+        # This piece meets minimum - add accumulated extension to it
+        if current_extension > 0.001
+          piece[:length] += current_extension
+          piece[:type] = "extended" if piece[:type] != "extended"
+          current_extension = 0.0
+        end
+        filtered_pieces << piece
+      end
+    end
+    
+    # If we have leftover extension and pieces, add it to the last piece
+    if current_extension > 0.001 && filtered_pieces.length > 0
+      filtered_pieces.last[:length] += current_extension
+      filtered_pieces.last[:type] = "extended"
+    end
+    
+    return filtered_pieces
+  end
+
+  def self.is_single_length_mode?(length_values)
+    return length_values.length == 1
+  end
+
+  def self.generate_single_length_row_with_min_piece(row_width, piece_length_su, joint_length_su, min_piece_su, unit_conversion)
+    pieces = []
+    current_pos = 0.0
+    
+    # Generate full pieces
+    while current_pos + piece_length_su <= row_width
+      pieces << { start: current_pos, length: piece_length_su, type: "full" }
+      current_pos += piece_length_su + joint_length_su
+    end
+    
+    remainder = row_width - current_pos
+    
+    # Check if minimum piece constraint is enabled
+    constraint_enabled = @@single_row_mode ? true : @@enable_min_piece_length
+    
+    if remainder > 0.001
+      if constraint_enabled && remainder < min_piece_su && pieces.length > 0
+        # Merge small remainder with last piece
+        last_piece = pieces.last
+        adjustment = remainder + joint_length_su
+        last_piece[:length] += adjustment
+        last_piece[:type] = "adjusted"
+      else
+        # Add remainder as cut piece
+        pieces << { start: current_pos, length: remainder, type: "cut" }
+      end
+    end
+    
+    return pieces
+  end
+
+  def self.generate_row_with_face_bounds_min_piece(row_start_x, row_width, local_bounds, length_values_su, joint_length_su, min_piece_su, unit_conversion, randomize = false)
+    pieces = []
+    current_pos = 0.0
+    length_index = 0
+    
+    while current_pos < row_width
+      current_length = randomize ? length_values_su[rand(length_values_su.length)] : length_values_su[length_index % length_values_su.length]
+      
+      if current_pos + current_length <= row_width
+        # Check what the actual trimmed size would be
+        piece_start_x = row_start_x + current_pos
+        piece_end_x = piece_start_x + current_length
+        
+        intersect_left = [piece_start_x, local_bounds.min.x].max
+        intersect_right = [piece_end_x, local_bounds.max.x].min
+        actual_trimmed_width = intersect_right - intersect_left
+        
+        if actual_trimmed_width >= min_piece_su || min_piece_su == 0
+          pieces << { start: current_pos, length: current_length, type: "full" }
+          current_pos += current_length + joint_length_su
+          length_index += 1 unless randomize
+        else
+          # This piece would be too small after trimming - extend previous piece
+          if pieces.length > 0
+            last_piece = pieces.last
+            extension = (row_width - last_piece[:start])
+            last_piece[:length] = extension
+            last_piece[:type] = "extended"
+          end
+          break
+        end
+      else
+        remainder = row_width - current_pos
+        if remainder > 0.001
+          # Check if remainder would be too small after trimming
+          piece_start_x = row_start_x + current_pos
+          piece_end_x = piece_start_x + remainder
+          
+          intersect_left = [piece_start_x, local_bounds.min.x].max
+          intersect_right = [piece_end_x, local_bounds.max.x].min
+          actual_trimmed_width = intersect_right - intersect_left
+          
+          if actual_trimmed_width >= min_piece_su || min_piece_su == 0
+            pieces << { start: current_pos, length: remainder, type: "cut" }
+          elsif pieces.length > 0
+            # Extend last piece to fill the gap
+            last_piece = pieces.last
+            extension = remainder + joint_length_su
+            last_piece[:length] += extension
+            last_piece[:type] = "extended"
+          end
+        end
+        break
+      end
+    end
+    
+    return pieces
+  end
+
+  def self.generate_multi_length_row_with_min_piece(row_width, length_values_su, joint_length_su, min_piece_su, unit_conversion, randomize = false)
+    # First pass: generate pieces normally to see what we get
+    temp_pieces = []
+    current_pos = 0.0
+    length_index = 0
+    
+    while current_pos < row_width
+      current_length = randomize ? length_values_su[rand(length_values_su.length)] : length_values_su[length_index % length_values_su.length]
+      
+      if current_pos + current_length <= row_width
+        temp_pieces << current_length
+        current_pos += current_length + joint_length_su
+        length_index += 1 unless randomize
+      else
+        remainder = row_width - current_pos
+        if remainder > 0.001
+          temp_pieces << remainder
+        end
+        break
+      end
+    end
+    
+    # Check if minimum piece constraint is enabled and last piece is too small
+    constraint_enabled = @@single_row_mode ? true : @@enable_min_piece_length
+    
+    if constraint_enabled && temp_pieces.length > 1 && temp_pieces.last < min_piece_su
+      # Distribute the small piece among adjacent pieces
+      small_piece = temp_pieces.pop
+      if temp_pieces.length > 0
+        # Add to previous piece
+        temp_pieces[-1] += small_piece + joint_length_su
+      end
+    end
+    
+    # Convert to final pieces with positions
+    pieces = []
+    current_pos = 0.0
+    temp_pieces.each do |length|
+      pieces << { start: current_pos, length: length, type: length == temp_pieces.first || length == temp_pieces.last ? "edge" : "full" }
+      current_pos += length + joint_length_su
+    end
+    
+    return pieces
+  end
+
+  # --- Rail parameters ---
+  @@enable_top_rail = true
+  @@enable_bottom_rail = true
+  @@enable_left_rail = false
+  @@enable_right_rail = false
+  @@top_rail_thickness = 20.0
+  @@top_rail_depth = 300.0
+  @@bottom_rail_thickness = 20.0
+  @@bottom_rail_depth = 300.0
+  @@left_rail_thickness = 20.0
+  @@left_rail_depth = 300.0
+  @@right_rail_thickness = 20.0
+  @@right_rail_depth = 300.0
+  @@rail_color_name = "PARAMETRIX-RAILS"
+  @@split_rails = false
+  
+  # Real-time generation settings (Not currently used in this version, but kept for future)
+  @@enable_realtime_generation = true
+  @@generation_delay = 0.01
+  @@show_confirmation_popup = false
+  
+  # Preview tracking
+  @@preview_group = nil
+  @@current_dialog = nil
+  @@current_multi_face_position = nil
+  @@realtime_timer = nil
+
+  def self.get_unit_name
+    unit = Sketchup.active_model.options["UnitsOptions"]["LengthUnit"]
+    unit_names = ["inches", "feet", "mm", "cm", "m"]
+    unit_names[unit] || "cm"
+  end
+
+  def self.get_unit_conversion
+    unit = Sketchup.active_model.options["UnitsOptions"]["LengthUnit"]
+    conversions = [1.0, 12.0, 0.1/2.54, 1.0/2.54, 100.0/2.54]
+    return conversions[unit] if unit >= 0 && unit <= 4
+    1.0/2.54
+  end
+
+  def self.get_effective_unit
+    if @@manual_unit == "auto"
+      get_unit_name
+    else
+      @@manual_unit
+    end
+  end
+
+  def self.get_effective_unit_conversion
+    unit = get_effective_unit
+    case unit
+    when "mm"
+      0.1/2.54
+    when "cm"
+      1.0/2.54
+    when "m"
+      100.0/2.54
+    when "feet"
+      12.0
+    when "inches"
+      1.0
+    else
+      get_unit_conversion
+    end
+  end
+
+  def self.analyze_multi_face_selection(selection)
+    faces_data = []
+    selection.each do |entity|
+      if entity.is_a?(Sketchup::Face)
+        faces_data << { face: entity, matrix: Geom::Transformation.new, source: "direct" }
+      elsif entity.is_a?(Sketchup::Group) || entity.is_a?(Sketchup::ComponentInstance)
+        entity.definition.entities.each do |sub_entity|
+          if sub_entity.is_a?(Sketchup::Face)
+            faces_data << { face: sub_entity, matrix: entity.transformation, source: "group/component" }
+          end
+        end
+      end
+    end
+    return faces_data
+  end
+
+  def self.validate_faces_for_processing(faces_data)
+    return false if faces_data.empty?
+
+    valid_faces = faces_data.select { |data| data[:face] && data[:face].valid? }
+
+    if valid_faces.length != faces_data.length
+      return false
+    end
+
+    unit_conversion = get_effective_unit_conversion
+    min_area = (100.0 * unit_conversion) ** 2
+
+    valid_faces.each_with_index do |data, index|
+      face = data[:face]
+      area = face.area
+
+      if area < min_area
+        return false
+      end
+    end
+    return true
+  end
+
+  def self.get_proper_active_context
+    model = Sketchup.active_model
+
+    if model.active_path && model.active_path.length > 0
+      active_entities = model.active_entities
+      context_parts = []
+      model.active_path.each_with_index do |entity, index|
+        if entity.is_a?(Sketchup::Group)
+          context_parts << "Group[#{index}]"
+        elsif entity.is_a?(Sketchup::ComponentInstance)
+          context_parts << "Component[#{index}]:#{entity.definition.name}"
+        end
+      end
+      context_name = "Nested: #{context_parts.join(' > ')}"
+      return [active_entities, context_name]
+    else
+      return [model.entities, "Model"]
+    end
+  end
+
+  def self.detect_corner_type(face, face_matrix, all_faces_data)
+    face_normal = face.normal
+    if face_matrix && face_matrix != Geom::Transformation.new
+      face_normal = face_normal.transform(face_matrix)
+    end
+    
+    adjacent_faces = 0
+    all_faces_data.each do |other_data|
+      next if other_data[:face] == face
+      
+      other_normal = other_data[:face].normal
+      if other_data[:matrix] && other_data[:matrix] != Geom::Transformation.new
+        other_normal = other_normal.transform(other_data[:matrix])
+      end
+      
+      dot_product = face_normal.dot(other_normal)
+      if dot_product.abs < 0.1
+        adjacent_faces += 1
+      end
+    end
+    
+    corner_type = adjacent_faces > 0 ? "internal" : "external"
+    
+    return corner_type
+  end
+
+  def self.calculate_cavity_offset_with_corner_logic(original_face, face_matrix, cavity_distance_su, face_index, corner_type)
+    original_face_normal = original_face.normal
+    if face_matrix && face_matrix != Geom::Transformation.new
+      original_face_normal = original_face_normal.transform(face_matrix)
+    end
+
+    outward_normal = original_face_normal.clone
+    outward_normal.normalize!
+
+    cavity_offset = outward_normal.clone
+    cavity_offset.length = cavity_distance_su
+
+    return { cavity_offset: cavity_offset, original_normal: original_face_normal, outward_normal: outward_normal, corner_type: corner_type }
+  end
+
+  def self.create_virtual_extended_bounds(face, face_matrix, cavity_distance_su, face_index, all_faces_data)
+    face_bounds = face.bounds
+    if face_matrix && face_matrix != Geom::Transformation.new
+      min_pt = face_bounds.min.transform(face_matrix)
+      max_pt = face_bounds.max.transform(face_matrix)
+      face_center = Geom::Point3d.new(
+        (min_pt.x + max_pt.x) / 2.0,
+        (min_pt.y + max_pt.y) / 2.0,
+        (min_pt.z + max_pt.z) / 2.0
+      )
+    else
+      face_center = face_bounds.center
+    end
+
+    corner_type = detect_corner_type(face, face_matrix, all_faces_data)
+    cavity_data = calculate_cavity_offset_with_corner_logic(face, face_matrix, cavity_distance_su, face_index, corner_type)
+    cavity_offset = cavity_data[:cavity_offset]
+    original_normal = cavity_data[:original_normal]
+    outward_normal = cavity_data[:outward_normal]
+
+    face_center_with_cavity = face_center.offset(cavity_offset)
+
+    return { 
+      face_center_with_cavity: face_center_with_cavity, 
+      original_normal: original_normal, 
+      outward_normal: outward_normal,
+      cavity_offset: cavity_offset,
+      corner_type: corner_type
+    }
+  end
+
+  def self.get_face_transformation_matrix_user_logic(face, face_matrix, cavity_distance_su, face_index, all_faces_data)
+    face_normal = face.normal
+    if face_matrix && face_matrix != Geom::Transformation.new
+      face_normal = face_normal.transform(face_matrix)
+    end
+
+    bounds_data = create_virtual_extended_bounds(face, face_matrix, cavity_distance_su, face_index, all_faces_data)
+    face_center_with_cavity = bounds_data[:face_center_with_cavity]
+    original_normal = bounds_data[:original_normal]
+    outward_normal = bounds_data[:outward_normal]
+    corner_type = bounds_data[:corner_type]
+
+    if @@force_horizontal_layout
+      face_normal_abs = Geom::Vector3d.new(face_normal.x.abs, face_normal.y.abs, face_normal.z.abs)
+
+      if face_normal_abs.z > 0.8
+        x_axis = Geom::Vector3d.new(1, 0, 0)
+        y_axis = Geom::Vector3d.new(0, 1, 0)
+        orientation = "HORIZONTAL"
+      elsif face_normal_abs.y > 0.8
+        x_axis = Geom::Vector3d.new(1, 0, 0)
+        y_axis = Geom::Vector3d.new(0, 0, 1)
+        orientation = "FRONT/BACK WALL"
+      elsif face_normal_abs.x > 0.8
+        x_axis = Geom::Vector3d.new(0, 1, 0)
+        y_axis = Geom::Vector3d.new(0, 0, 1)
+        orientation = "LEFT/RIGHT WALL"
+      else
+        horizontal_normal = Geom::Vector3d.new(face_normal.x, face_normal.y, 0)
+        if horizontal_normal.length > 0.001
+          horizontal_normal.normalize!
+          x_axis = horizontal_normal.cross(Geom::Vector3d.new(0, 0, 1))
+          y_axis = Geom::Vector3d.new(0, 0, 1)
+        else
+          x_axis = Geom::Vector3d.new(1, 0, 0)
+          y_axis = Geom::Vector3d.new(0, 0, 1)
+        end
+        orientation = "ANGLED"
+      end
+    else
+      longest_edge = nil
+      max_length = 0.0
+
+      face.outer_loop.edges.each do |edge|
+        if edge.length > max_length
+          max_length = edge.length
+          longest_edge = edge
+        end
+      end
+
+      if longest_edge
+        x_axis = longest_edge.line[1].normalize
+        if face_matrix && face_matrix != Geom::Transformation.new
+          x_axis = x_axis.transform(face_matrix)
+        end
+      else
+        if face_normal.parallel?(Geom::Vector3d.new(0, 0, 1))
+          x_axis = Geom::Vector3d.new(1, 0, 0)
+        else
+          x_axis = face_normal.cross(Geom::Vector3d.new(0, 0, 1)).normalize
+        end
+      end
+
+      y_axis = face_normal.cross(x_axis).normalize
+      orientation = "FACE-ORIENTED"
+    end
+
+    face_transform = Geom::Transformation.axes(face_center_with_cavity, x_axis, y_axis, face_normal)
+
+    return { 
+      transform: face_transform, 
+      original_normal: original_normal,
+      outward_normal: outward_normal,
+      corner_type: corner_type,
+      x_axis: x_axis,
+      y_axis: y_axis
+    }
+  end
+
+  def self.get_face_local_bounds_with_fixed_extension(face, face_matrix, face_transform, cavity_distance_su, face_index, corner_type)
+    vertices = []
+    face.outer_loop.vertices.each do |vertex|
+      pt = vertex.position
+      if face_matrix && face_matrix != Geom::Transformation.new
+        pt = pt.transform(face_matrix)
+      end
+      local_pt = pt.transform(face_transform.inverse)
+      vertices << local_pt
+    end
+
+    local_bounds = Geom::BoundingBox.new
+    vertices.each { |pt| local_bounds.add(pt) }
+
+    # Apply corner extension using cavity distance for proper connections
+    if @@preserve_corners && cavity_distance_su > 0.001
+      if corner_type == "internal"
+        corner_extension = cavity_distance_su * 0.75
+      else
+        corner_extension = cavity_distance_su * 1.0
+      end
+
+      extended_bounds = Geom::BoundingBox.new
+      extended_bounds.add([
+        local_bounds.min.x - corner_extension,
+        local_bounds.min.y - corner_extension,
+        local_bounds.min.z
+      ])
+      extended_bounds.add([
+        local_bounds.max.x + corner_extension,
+        local_bounds.max.y + corner_extension,
+        local_bounds.max.z
+      ])
+
+      return extended_bounds
+    end
+    
+    return local_bounds
+  end
+
+  def self.calculate_global_unified_bounds(all_faces_data, cavity_distance_su)
+    face_transforms = []
+    
+    all_faces_data.each_with_index do |face_data, face_index|
+      face = face_data[:face]
+      face_matrix = face_data[:matrix]
+      
+      corner_type = detect_corner_type(face, face_matrix, all_faces_data)
+      transform_data = get_face_transformation_matrix_user_logic(face, face_matrix, cavity_distance_su, face_index, all_faces_data)
+      face_transform = transform_data[:transform]
+      original_normal = transform_data[:original_normal]
+      local_bounds = get_face_local_bounds_with_fixed_extension(face, face_matrix, face_transform, cavity_distance_su, face_index, corner_type)
+      
+      face_transforms << {
+        face_data: face_data,
+        transform: face_transform,
+        local_bounds: local_bounds,
+        corner_type: corner_type,
+        original_normal: original_normal,
+        x_axis: transform_data[:x_axis],
+        y_axis: transform_data[:y_axis]
+      }
+    end
+    
+    # Use first face bounds as global bounds for single face
+    first_bounds = face_transforms[0][:local_bounds]
+    unified_bounds = Geom::BoundingBox.new
+    unified_bounds.add(first_bounds.min)
+    unified_bounds.add(first_bounds.max)
+    
+    unified_transform = Geom::Transformation.new
+    
+    return {
+      global_bounds: unified_bounds,
+      reference_transform: unified_transform,
+      face_transforms: face_transforms
+    }
+  end
+
+  def self.calculate_unified_start_position(global_bounds, avg_length_su, avg_height_su, joint_length_su, joint_width_su, single_row_mode)
+    layout_width = global_bounds.width
+    layout_height = global_bounds.height
+
+    elements_x = ((layout_width + joint_length_su) / (avg_length_su + joint_length_su)).ceil + 6
+    
+    if single_row_mode
+      elements_y = 1 # Force to 1 row
+      effective_layout_height_for_pattern = avg_height_su 
+    else
+      elements_y = ((layout_height + joint_width_su) / (avg_height_su + joint_width_su)).ceil + 6
+      effective_layout_height_for_pattern = layout_height
+    end
+
+    total_pattern_width = elements_x * avg_length_su + (elements_x - 1) * joint_length_su
+    total_pattern_height = elements_y * avg_height_su + (elements_y - 1) * joint_width_su
+
+    margin_x = avg_length_su * 2.0
+    margin_y = avg_height_su * 2.0
+    
+    case @@layout_start_direction
+    when "top_left"
+      start_x = global_bounds.min.x - margin_x
+      start_y = global_bounds.max.y - margin_y
+    when "top"
+      start_x = global_bounds.min.x + (layout_width - total_pattern_width) / 2.0 - margin_x
+      start_y = global_bounds.max.y - margin_y
+    when "top_right"
+      start_x = global_bounds.max.x - total_pattern_width + margin_x
+      start_y = global_bounds.max.y - margin_y
+    when "left"
+      start_x = global_bounds.min.x - margin_x
+      start_y = global_bounds.min.y + (layout_height - total_pattern_height) / 2.0 - margin_y
+    when "center"
+      start_x = global_bounds.min.x + (layout_width - total_pattern_width) / 2.0 - margin_x
+      start_y = global_bounds.min.y + (layout_height - total_pattern_height) / 2.0 - margin_y
+    when "right"
+      start_x = global_bounds.max.x - total_pattern_width + margin_x
+      start_y = global_bounds.min.y + (layout_height - total_pattern_height) / 2.0 - margin_y
+    when "bottom_left"
+      start_x = global_bounds.min.x - margin_x
+      start_y = global_bounds.min.y - margin_y
+    when "bottom"
+      start_x = global_bounds.min.x + (layout_width - total_pattern_width) / 2.0 - margin_x
+      start_y = global_bounds.min.y - margin_y
+    when "bottom_right"
+      start_x = global_bounds.max.x - total_pattern_width + margin_x
+      start_y = global_bounds.min.y - margin_y
+    else # fallback to center
+      start_x = global_bounds.min.x + (layout_width - total_pattern_width) / 2.0 - margin_x
+      start_y = global_bounds.min.y + (layout_height - total_pattern_height) / 2.0 - margin_y
+    end
+
+    unit_conversion = get_effective_unit_conversion
+    unit_name = get_effective_unit
+
+    return [start_x, start_y, elements_x, elements_y]
+  end
+
+  def self.parse_multi_values(value_string, randomize = false)
+    return [] if value_string.nil? || value_string.strip.empty?
+
+    cleaned = value_string.to_s.strip
+
+    if cleaned.include?(';')
+      values = cleaned.split(';').map { |v| v.strip.to_f }.select { |v| v > 0 }
+      values = values.shuffle if randomize && values.length > 1
+      values
+    else
+      single_val = cleaned.to_f
+      single_val > 0 ? [single_val] : []
+    end
+  end
+
+  def self.get_height_values_with_start_index(height_values, start_index)
+    # FIXED: Clearer implementation with explicit documentation
+    # This function rotates the height pattern to start from a specific index
+    # start_index is 1-based (user-friendly), so index 1 = first element
+    
+    return height_values if height_values.length <= 1
+    
+    # Validate start_index is within bounds
+    if start_index <= 0 || start_index > height_values.length
+      # Invalid index - return original pattern
+      return height_values
+    end
+    
+    # Convert 1-based user index to 0-based array index
+    array_index = start_index - 1
+    
+    # Rotate array: take elements from array_index to end, then prepend elements from start to array_index
+    rotated_pattern = height_values[array_index..-1] + height_values[0...array_index]
+    
+    return rotated_pattern
+  end
+  
+  def self.create_materials(color_name, rail_color_name = nil)
+    materials_array = []
+    model = Sketchup.active_model
+    materials = model.materials
+
+    base_material = materials[color_name]
+    unless base_material
+      base_material = materials.add(color_name)
+      base_material.color = Sketchup::Color.new(122, 122, 122)
+    end
+    materials_array << base_material
+
+    if rail_color_name
+      rail_material = materials[rail_color_name]
+      unless rail_material
+        rail_material = materials.add(rail_color_name)
+        rail_material.color = Sketchup::Color.new(80, 80, 80)
+      end
+      materials_array << rail_material
+    end
+
+    materials_array
+  end
+
+  def self.remove_preview
+    if @@preview_group
+      model = Sketchup.active_model
+      if @@preview_group.is_a?(Array)
+        @@preview_group.each { |group| model.entities.erase_entities(group) if group && group.valid? }
+      elsif @@preview_group.valid?
+        model.entities.erase_entities(@@preview_group)
+      end
+      puts "[PARAMETRIX P-24] Previous preview removed"
+    end
+    @@preview_group = nil
+  end
+
+  def self.create_piece_with_ghosting(face_group, world_points, materials, thickness_su, original_normal, piece_index, total_pieces, is_preview = false, original_face = nil, face_matrix = nil)
+    begin
+      # Create individual solid group for each piece
+      piece_group = face_group.entities.add_group
+      face_element = piece_group.entities.add_face(world_points)
+      
+      if face_element
+        if is_preview
+          face_element.material = "#CCCCCC"
+          face_element.back_material = "#CCCCCC"
+        else
+          face_element.material = materials.first
+          face_element.back_material = materials.first
+
+          if thickness_su > 0.001
+            layout_normal = face_element.normal
+            if layout_normal.samedirection?(original_normal)
+              pushpull_distance = -thickness_su
+            else
+              pushpull_distance = thickness_su
+            end
+            
+            # Pushpull to create solid
+            result = face_element.pushpull(pushpull_distance)
+            
+            # Ensure all faces have materials for solid appearance
+            piece_group.entities.each do |entity|
+              if entity.is_a?(Sketchup::Face)
+                entity.material = materials.first unless entity.material
+                entity.back_material = materials.first unless entity.back_material
+              end
+            end
+          end
+        end
+        
+        piece_group.name = "Piece_#{piece_index + 1}"
+        return true
+      end
+    rescue => e
+      puts "[PARAMETRIX] Error creating piece: #{e.message}"
+      return false
+    end
+  end
+
+  def self.trim_piece_to_face_boundary(piece_face, original_face, face_matrix)
+    begin
+      # Get original face boundary points in world coordinates
+      boundary_points = []
+      original_face.outer_loop.vertices.each do |vertex|
+        pt = vertex.position
+        if face_matrix && face_matrix != Geom::Transformation.new
+          pt = pt.transform(face_matrix)
+        end
+        boundary_points << pt
+      end
+      
+      # Get piece face vertices
+      piece_vertices = piece_face.outer_loop.vertices.map { |v| v.position }
+      
+      # Check if piece center is inside original face boundary
+      piece_center = piece_face.bounds.center
+      
+      # Simple point-in-polygon test using ray casting
+      if point_in_polygon?(piece_center, boundary_points)
+        # Piece is inside - keep it
+        return piece_face
+      else
+        # Piece is outside - check for intersection
+        intersection_points = []
+        
+        # Find intersection points between piece edges and boundary
+        piece_vertices.each_with_index do |v1, i|
+          v2 = piece_vertices[(i + 1) % piece_vertices.length]
+          
+          boundary_points.each_with_index do |b1, j|
+            b2 = boundary_points[(j + 1) % boundary_points.length]
+            
+            intersection = line_intersect_2d(v1, v2, b1, b2)
+            if intersection
+              intersection_points << intersection
+            end
+          end
+        end
+        
+        # If we have intersection points, create trimmed piece
+        if intersection_points.length >= 3
+          # Remove duplicate points
+          unique_points = intersection_points.uniq { |pt| [pt.x.round(6), pt.y.round(6)] }
+          
+          if unique_points.length >= 3
+            trimmed_face = piece_face.parent.entities.add_face(unique_points)
+            piece_face.parent.entities.erase_entities(piece_face)
+            return trimmed_face
+          end
+        end
+        
+        # No valid intersection - remove piece
+        piece_face.parent.entities.erase_entities(piece_face)
+        return nil
+      end
+      
+    rescue => e
+      puts "[PARAMETRIX] Trimming failed: #{e.message}"
+      return piece_face
+    end
+  end
+  
+  def self.create_cutting_component_from_layout_NEW_METHOD(layout_group, original_face, face_matrix)
+    begin
+      puts "[PARAMETRIX] NEW OOB METHOD CALLED - STARTING BOOLEAN TRIMMING"
+      model = Sketchup.active_model
+      ents = model.active_entities
+      
+      # Exact Oob boolean2d method
+      gp = ents.add_group
+      gents = gp.entities
+      oob_face_clone(gents, [original_face], face_matrix)
+      
+      # Get cloned face
+      oface = nil
+      gents.each { |e| oface = e if e.is_a?(Sketchup::Face) }
+      return layout_group unless oface
+      
+      # Intersect - exact Oob method
+      tr = Geom::Transformation.new
+      gptr = gp.transformation
+      cents = layout_group.entities
+      
+      cents.intersect_with(false, gptr, cents, tr, false, [gp])
+      cents.intersect_with(false, gptr, cents, tr, false, [gp])
+      
+      gp2ptogo = []
+      
+      # Collect edges - exact Oob logic
+      cents.to_a.each do |edge|
+        if edge.is_a?(Sketchup::Edge)
+          if oface.classify_point(edge.start) == Sketchup::Face::PointOutside &&
+             oface.classify_point(edge.end) == Sketchup::Face::PointOutside
+            gp2ptogo << edge
+          end
+          
+          # Offset point to middle of edge and test
+          if oface.classify_point(edge.start.position.offset(edge.line[1], edge.length/2)) == Sketchup::Face::PointOutside
+            gp2ptogo << edge
+          end
+        end
+      end
+      
+      cents.erase_entities(gp2ptogo)
+      
+      # Remove faces in holes - exact Oob logic
+      faces2go2 = []
+      cents.to_a.each do |gface|
+        if gface.is_a?(Sketchup::Face)
+          hole = true
+          gface.outer_loop.edges.each do |e|
+            if e.faces.length == 1
+              hole = false
+              break
+            end
+          end
+          next unless hole
+          
+          pt = gface.bounds.center.project_to_plane(oface.plane)
+          if oface.classify_point(pt) == Sketchup::Face::PointOutside
+            faces2go2 << gface
+          end
+        end
+      end
+      
+      cents.erase_entities(faces2go2)
+      gp.erase!
+      
+      puts "[PARAMETRIX] Oob method: removed #{gp2ptogo.length} edges, #{faces2go2.length} faces"
+      
+      # Convert to component
+      inst = layout_group.to_component
+      defn = inst.definition
+      be = defn.behavior
+      
+      be.is2d = true
+      be.cuts_opening = true
+      defn.invalidate_bounds
+      
+      inst.name = "PARAMETRIX Layout Cut"
+      defn.name = "PARAMETRIX Layout Cut Def"
+      
+      return inst
+      
+    rescue => e
+      puts "[PARAMETRIX] Boolean trimming failed: #{e.message}"
+      return layout_group
+    end
+  end
+  
+  def self.oob_face_clone(gents, faces, face_matrix)
+    faces2go = []
+    
+    faces.each do |face|
+      # Create face from each loop
+      face.loops.each { |loop| gents.add_face(loop.vertices) }
+      oface = gents.add_face(face.outer_loop.vertices) # Make outer face again
+      
+      # Find inner faces to erase
+      gents.each do |face_ent|
+        next unless face_ent.is_a?(Sketchup::Face)
+        face_ent.edges.each do |e|
+          unless e.faces[1] # Edge bordered by only one face
+            break
+          end
+          faces2go << face_ent # All edges bordered by 2 faces = inner face
+        end
+      end
+      gents.erase_entities(faces2go) # Remove inner faces to create holes
+    end
+  end
+  
+  def self.face_clone(gents, face, face_matrix)
+    # Clone outer loop
+    ov = []
+    face.outer_loop.vertices.each do |v|
+      pt = v.position
+      if face_matrix && face_matrix != Geom::Transformation.new
+        pt = pt.transform(face_matrix)
+      end
+      ov.push(pt)
+    end
+    outer_face = gents.add_face(ov)
+    
+    # Clone inner loops (holes)
+    inner_faces = []
+    if face.loops.length > 1
+      il = face.loops.dup
+      il.shift # Remove outer loop
+      il.each do |loop|
+        iv = []
+        loop.vertices.each do |v|
+          pt = v.position
+          if face_matrix && face_matrix != Geom::Transformation.new
+            pt = pt.transform(face_matrix)
+          end
+          iv.push(pt)
+        end
+        inner_face = gents.add_face(iv)
+        inner_faces.push(inner_face)
+      end
+      # Erase inner faces to create holes
+      inner_faces.each { |f| f.erase! }
+    end
+    
+    return outer_face
+  end
+
+  def self.create_rails_for_face(face_data, rails_group, rail_material, unit_conversion, face_index, cavity_distance_su, all_faces_data, local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su, top_row_joints = [], bottom_row_joints = [], stone_min_x_for_rails = nil, stone_max_x_for_rails = nil, joint_length_su = 0)
+    return unless @@enable_top_rail || @@enable_bottom_rail || @@enable_left_rail || @@enable_right_rail
+
+    top_rail_thickness_su = @@top_rail_thickness * unit_conversion
+    top_rail_depth_su = @@top_rail_depth * unit_conversion
+    bottom_rail_thickness_su = @@bottom_rail_thickness * unit_conversion
+    bottom_rail_depth_su = @@bottom_rail_depth * unit_conversion
+    left_rail_thickness_su = @@left_rail_thickness * unit_conversion
+    left_rail_depth_su = @@left_rail_depth * unit_conversion
+    right_rail_thickness_su = @@right_rail_thickness * unit_conversion
+    right_rail_depth_su = @@right_rail_depth * unit_conversion
+    
+    # Use provided stone bounds or fallback to local bounds
+    stone_min_x = stone_min_x_for_rails || local_bounds.min.x
+    stone_max_x = stone_max_x_for_rails || local_bounds.max.x
+
+    if @@enable_top_rail
+      # FIXED: Top rail positioning with proper cavity spacing for "top" layout direction
+      # When layout starts from top, add joint spacing to prevent overlap
+      if @@layout_start_direction == "top" || @@layout_start_direction == "top_left" || @@layout_start_direction == "top_right"
+        rail_y_pos = stone_max_y_for_rails + joint_width_su
+      else
+        rail_y_pos = stone_max_y_for_rails
+      end
+      
+      rail_segments = []
+      if @@split_rails && !top_row_joints.empty?
+        top_row_joints.each do |joint|
+          rail_segments << { start: joint[:start], end: joint[:end] }
+        end
+      else
+        rail_segments << { start: local_bounds.min.x, end: local_bounds.max.x }
+      end
+
+      rail_segments.each do |segment|
+        rail_start_x = segment[:start]
+        rail_end_x = segment[:end]
+
+        next if (rail_end_x - rail_start_x).abs < 0.001
+
+        local_rail_points = [
+          Geom::Point3d.new(rail_start_x, rail_y_pos, 0),
+          Geom::Point3d.new(rail_end_x, rail_y_pos, 0),
+          Geom::Point3d.new(rail_end_x, rail_y_pos + top_rail_thickness_su, 0),
+          Geom::Point3d.new(rail_start_x, rail_y_pos + top_rail_thickness_su, 0)
+        ]
+        
+        world_rail_points = local_rail_points.map { |pt| pt.transform(face_transform) }
+        
+        begin
+          rail_face = rails_group.entities.add_face(world_rail_points)
+          if rail_face
+            rail_face.material = rail_material
+            rail_face.back_material = rail_material
+            
+            rail_normal = rail_face.normal
+            if rail_normal.samedirection?(original_normal)
+              pushpull_distance = -top_rail_depth_su
+            else
+              pushpull_distance = top_rail_depth_su
+            end
+            rail_face.pushpull(pushpull_distance)
+          end
+        rescue => e
+        end
+      end
+    end
+
+    if @@enable_bottom_rail
+      # FIXED: Bottom rail should be positioned directly below the stones
+      # The rail extends downward from stone_min_y_for_rails
+      rail_y_pos = stone_min_y_for_rails - bottom_rail_thickness_su
+      
+      rail_segments = []
+      if @@split_rails && !bottom_row_joints.empty?
+        bottom_row_joints.each do |joint|
+          rail_segments << { start: joint[:start], end: joint[:end] }
+        end
+      else
+        rail_segments << { start: local_bounds.min.x, end: local_bounds.max.x }
+      end
+
+      rail_segments.each do |segment|
+        rail_start_x = segment[:start]
+        rail_end_x = segment[:end]
+
+        next if (rail_end_x - rail_start_x).abs < 0.001
+
+        local_rail_points = [
+          Geom::Point3d.new(rail_start_x, rail_y_pos, 0),
+          Geom::Point3d.new(rail_end_x, rail_y_pos, 0),
+          Geom::Point3d.new(rail_end_x, rail_y_pos + bottom_rail_thickness_su, 0),
+          Geom::Point3d.new(rail_start_x, rail_y_pos + bottom_rail_thickness_su, 0)
+        ]
+        
+        world_rail_points = local_rail_points.map { |pt| pt.transform(face_transform) }
+        
+        begin
+          rail_face = rails_group.entities.add_face(world_rail_points)
+          if rail_face
+            rail_face.material = rail_material
+            rail_face.back_material = rail_material
+            
+            rail_normal = rail_face.normal
+            if rail_normal.samedirection?(original_normal)
+              pushpull_distance = -bottom_rail_depth_su
+            else
+              pushpull_distance = bottom_rail_depth_su
+            end
+            rail_face.pushpull(pushpull_distance)
+          end
+        rescue => e
+        end
+      end
+    end
+
+    if @@enable_left_rail
+      rail_x_pos = stone_min_x - left_rail_thickness_su
+      
+      local_rail_points = [
+        Geom::Point3d.new(rail_x_pos, local_bounds.min.y, 0),
+        Geom::Point3d.new(rail_x_pos + left_rail_thickness_su, local_bounds.min.y, 0),
+        Geom::Point3d.new(rail_x_pos + left_rail_thickness_su, local_bounds.max.y, 0),
+        Geom::Point3d.new(rail_x_pos, local_bounds.max.y, 0)
+      ]
+      
+      world_rail_points = local_rail_points.map { |pt| pt.transform(face_transform) }
+      
+      begin
+        rail_face = rails_group.entities.add_face(world_rail_points)
+        if rail_face
+          rail_face.material = rail_material
+          rail_face.back_material = rail_material
+          
+          rail_normal = rail_face.normal
+          if rail_normal.samedirection?(original_normal)
+            pushpull_distance = -left_rail_depth_su
+          else
+            pushpull_distance = left_rail_depth_su
+          end
+          rail_face.pushpull(pushpull_distance)
+        end
+      rescue => e
+      end
+    end
+
+    if @@enable_right_rail
+      rail_x_pos = stone_max_x
+      
+      local_rail_points = [
+        Geom::Point3d.new(rail_x_pos, local_bounds.min.y, 0),
+        Geom::Point3d.new(rail_x_pos + right_rail_thickness_su, local_bounds.min.y, 0),
+        Geom::Point3d.new(rail_x_pos + right_rail_thickness_su, local_bounds.max.y, 0),
+        Geom::Point3d.new(rail_x_pos, local_bounds.max.y, 0)
+      ]
+      
+      world_rail_points = local_rail_points.map { |pt| pt.transform(face_transform) }
+      
+      begin
+        rail_face = rails_group.entities.add_face(world_rail_points)
+        if rail_face
+          rail_face.material = rail_material
+          rail_face.back_material = rail_material
+          
+          rail_normal = rail_face.normal
+          if rail_normal.samedirection?(original_normal)
+            pushpull_distance = -right_rail_depth_su
+          else
+            pushpull_distance = right_rail_depth_su
+          end
+          rail_face.pushpull(pushpull_distance)
+        end
+      rescue => e
+      end
+    end
+
+    return rails_group
+  end
+  
+  def self.create_rails_for_face_original(face_data, main_group, rail_material, unit_conversion, face_index, cavity_distance_su, all_faces_data, local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su, top_row_joints = [], bottom_row_joints = [], stone_min_x_for_rails = nil, stone_max_x_for_rails = nil, joint_length_su = 0)
+    return unless @@enable_top_rail || @@enable_bottom_rail || @@enable_left_rail || @@enable_right_rail
+
+    rails_group = main_group.entities.add_group
+    rails_group.name = "Rails_Face_#{face_index + 1}"
+    
+    create_rails_for_face(face_data, rails_group, rail_material, unit_conversion, face_index, cavity_distance_su, all_faces_data, local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su, top_row_joints, bottom_row_joints, stone_min_x_for_rails, stone_max_x_for_rails, joint_length_su)
+    
+    return rails_group
+  end
+  
+
+
+end
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\layout_engine.rb
+
+# PARAMETRIX Layout Engine
+# Contains the main layout generation logic and unified layout processing
+
+module PARAMETRIX
+
+    def self.create_unified_layout_for_face(face_transform_data, layout_group, rails_group, materials, unit_conversion, length_values, height_values, face_index, total_faces, cavity_distance_su, global_start_x, global_start_y, elements_x, elements_y, joint_length_su, joint_width_su, avg_length_su, avg_height_su, thickness_su, single_row_mode, layout_start_direction_for_single_row, is_preview = false, start_row_height_index = 1)
+    
+    face_data = face_transform_data[:face_data]
+    face = face_data[:face]
+    face_matrix = face_data[:matrix]
+    face_transform = face_transform_data[:transform]
+    local_bounds = face_transform_data[:local_bounds]
+    corner_type = face_transform_data[:corner_type]
+    original_normal = face_transform_data[:original_normal]
+
+    vertex_count = face.outer_loop.vertices.length
+    face_type = vertex_count == 4 ? "RECTANGULAR" : "COMPLEX (#{vertex_count} sides)"
+    
+
+    if @@use_flat_grouping
+      # Create pieces directly in layout_group for flat structure
+      face_group = layout_group
+    else
+      # Original nested structure
+      face_group = layout_group.entities.add_group
+      face_group.name = "Face_#{face_index + 1}_Unified_#{corner_type.capitalize}"
+    end
+
+    element_count = 0
+    trimmed_count = 0
+    piece_index = 0
+
+    # Initialize randomization seeds for this face
+    if @@synchronize_patterns
+      # Reset seeds at the start of each face to ensure synchronization
+      @current_length_seed = @global_length_seed || 12345
+      @current_height_seed = @global_height_seed || 54321
+    end
+
+    pos_y = global_start_y 
+    current_height_su = avg_height_su # Default, will be updated
+    
+
+    stone_min_y_for_rails = Float::INFINITY
+    stone_max_y_for_rails = -Float::INFINITY
+    stone_min_x_for_rails = Float::INFINITY
+    stone_max_x_for_rails = -Float::INFINITY
+    top_row_joint_positions = []
+    bottom_row_joint_positions = []
+    
+    # Initialize rail bounds based on layout bounds
+    initial_stone_min_y = local_bounds.min.y
+    initial_stone_max_y = local_bounds.max.y
+
+    # Override vertical positioning for single-row mode
+    if single_row_mode
+      current_height_su = height_values[0] * unit_conversion # User-specified height
+      
+      bottom_rail_thickness_su = @@enable_bottom_rail ? @@bottom_rail_thickness * unit_conversion : 0.0
+      top_rail_thickness_su = @@enable_top_rail ? @@top_rail_thickness * unit_conversion : 0.0
+      
+      # Calculate the effective vertical boundaries for the single row, considering rails and joints
+      effective_min_y = local_bounds.min.y + bottom_rail_thickness_su + joint_width_su
+      effective_max_y = local_bounds.max.y - top_rail_thickness_su - joint_width_su
+      
+      available_vertical_space = effective_max_y - effective_min_y
+
+      # Ensure the custom height doesn't exceed available space
+      if current_height_su > available_vertical_space
+        current_height_su = available_vertical_space
+      end
+
+      # Determine the starting Y position (bottom of the row) based on layout_start_direction
+      case layout_start_direction_for_single_row # Use the specific layout_start_direction for single row
+      when "bottom_left", "bottom", "bottom_right"
+        pos_y = effective_min_y
+
+      when "top_left", "top", "top_right"
+        pos_y = effective_max_y - current_height_su
+
+      when "left", "right", "center"
+        pos_y = effective_min_y + (available_vertical_space - current_height_su) / 2.0
+
+      else # fallback to center
+        pos_y = effective_min_y + (available_vertical_space - current_height_su) / 2.0
+
+      end
+      
+      # Store the actual stone bounds for rail placement - FIXED: Use actual stone positions
+      stone_min_y_for_rails = pos_y
+      stone_max_y_for_rails = pos_y + current_height_su
+      # Initialize X bounds for single row mode
+      stone_min_x_for_rails = local_bounds.min.x
+      stone_max_x_for_rails = local_bounds.max.x
+
+
+    else
+      # FIXED: height_index should start at 0 because height_values is already rotated
+      # The rotation happens in create_multi_face_unified_layout via get_height_values_with_start_index
+      # So we always start from index 0 of the already-rotated array
+      height_index = 0 # Only used in multi-row mode
+      # Initialize with local bounds - will be updated as stones are placed
+      stone_min_y_for_rails = initial_stone_max_y  # Start high, will be lowered
+      stone_max_y_for_rails = initial_stone_min_y  # Start low, will be raised
+      stone_min_x_for_rails = local_bounds.max.x   # Start high, will be lowered
+      stone_max_x_for_rails = local_bounds.min.x   # Start low, will be raised
+    end
+
+
+
+    # Generate layout using GLOBAL start position (no limits)
+    for row in 0...elements_y
+
+      unless single_row_mode # Only apply height pattern logic for multi-row mode
+        if height_values.length > 1 && @@randomize_heights
+          # Use dedicated height seed for synchronization
+          if @@synchronize_patterns
+            srand(@current_height_seed + row)
+          end
+          current_height = height_values[rand(height_values.length)]
+        elsif height_values.length > 1
+          current_height = height_values[height_index % height_values.length]
+          if row == 0
+            puts "[PARAMETRIX] Row 0 - Using height_index=#{height_index}, height_values[#{height_index % height_values.length}]=#{current_height}, Full pattern=[#{height_values.join(', ')}]"
+            puts "BOTTOM_ROW_HEIGHT: #{current_height}"
+          end
+          height_index += 1
+        else
+          current_height = height_values[0]
+        end
+        current_height_su = current_height * unit_conversion
+      end
+
+      row_offset = case @@pattern_type
+      when "running_bond"
+        (row % 2) * (avg_length_su + joint_length_su) * 0.5
+      else
+        0.0
+      end
+
+      row_start_x = global_start_x + row_offset
+      pos_x = row_start_x
+      length_index = 0
+
+      # Pre-calculate row pieces with gap filling
+      row_pieces = []
+      temp_pos_x = pos_x
+      temp_length_index = length_index
+      
+      # Generate initial pieces for this row
+      for col in 0...elements_x
+        if length_values.length > 1 && (single_row_mode ? @@single_row_randomize_lengths : @@randomize_lengths)
+          # Use dedicated length seed for synchronization
+          if @@synchronize_patterns
+            srand(@current_length_seed + row * 1000 + col)
+          end
+          current_length = length_values[rand(length_values.length)]
+        elsif length_values.length > 1
+          current_length = length_values[temp_length_index % length_values.length]
+          temp_length_index += 1
+        else
+          current_length = length_values[0]
+        end
+        current_length_su = current_length * unit_conversion
+        
+        element_right = temp_pos_x + current_length_su
+        intersect_left = [temp_pos_x, local_bounds.min.x].max
+        intersect_right = [element_right, local_bounds.max.x].min
+        
+        if intersect_left < intersect_right
+          trimmed_width = intersect_right - intersect_left
+          row_pieces << {
+            pos_x: temp_pos_x,
+            length_su: current_length_su,
+            trimmed_width: trimmed_width,
+            intersect_left: intersect_left,
+            intersect_right: intersect_right
+          }
+        end
+        
+        temp_pos_x += current_length_su + joint_length_su
+        break if temp_pos_x >= local_bounds.max.x + avg_length_su
+      end
+      
+      # Apply minimum piece constraint with gap filling
+      min_piece_su = @@enable_min_piece_length ? @@min_piece_length * unit_conversion : 0.0
+      if @@enable_min_piece_length && min_piece_su > 0.001
+        filtered_pieces = []
+        i = 0
+        while i < row_pieces.length
+          piece = row_pieces[i]
+          
+          if piece[:trimmed_width] < min_piece_su
+            # Small piece - extend adjacent piece to fill gap
+            gap_width = piece[:trimmed_width] + joint_length_su
+            
+            if i > 0 && filtered_pieces.length > 0
+              # Extend previous piece
+              prev_piece = filtered_pieces.last
+              prev_piece[:length_su] += gap_width
+              prev_piece[:intersect_right] += gap_width
+            elsif i < row_pieces.length - 1
+              # Extend next piece
+              next_piece = row_pieces[i + 1]
+              next_piece[:pos_x] -= gap_width
+              next_piece[:length_su] += gap_width
+              next_piece[:intersect_left] -= gap_width
+            end
+          else
+            filtered_pieces << piece
+          end
+          i += 1
+        end
+        row_pieces = filtered_pieces
+      end
+      
+      # Create actual pieces from processed row data
+      row_pieces.each do |piece_data|
+        element_top = pos_y + current_height_su
+        intersect_bottom = [pos_y, local_bounds.min.y].max
+        intersect_top = [element_top, local_bounds.max.y].min
+        
+        if piece_data[:intersect_left] < piece_data[:intersect_right] && intersect_bottom < intersect_top
+          trimmed_width = piece_data[:intersect_right] - piece_data[:intersect_left]
+          trimmed_height = intersect_top - intersect_bottom
+
+          if trimmed_width > 0.001 && trimmed_height > 0.001
+            local_points = [
+              Geom::Point3d.new(piece_data[:intersect_left], intersect_bottom, 0),
+              Geom::Point3d.new(piece_data[:intersect_right], intersect_bottom, 0),
+              Geom::Point3d.new(piece_data[:intersect_right], intersect_top, 0),
+              Geom::Point3d.new(piece_data[:intersect_left], intersect_top, 0)
+            ]
+
+            world_points = local_points.map { |pt| pt.transform(face_transform) }
+
+            if create_piece_with_ghosting(face_group, world_points, materials, thickness_su, original_normal, piece_index, elements_x * elements_y, is_preview, face, face_matrix)
+              element_count += 1
+              piece_index += 1
+
+              if intersect_top >= stone_max_y_for_rails
+                if (intersect_top - stone_max_y_for_rails).abs > 0.001
+                  top_row_joint_positions = [] # new top row
+                end
+                stone_max_y_for_rails = intersect_top
+                top_row_joint_positions << { start: piece_data[:intersect_left], end: piece_data[:intersect_right] }
+              end
+
+              if intersect_bottom <= stone_min_y_for_rails
+                if (intersect_bottom - stone_min_y_for_rails).abs > 0.001
+                  bottom_row_joint_positions = [] # new bottom row
+                end
+                stone_min_y_for_rails = intersect_bottom
+                bottom_row_joint_positions << { start: piece_data[:intersect_left], end: piece_data[:intersect_right] }
+              end
+              
+              # Track left and right boundaries
+              if piece_data[:intersect_left] < stone_min_x_for_rails
+                stone_min_x_for_rails = piece_data[:intersect_left]
+              end
+              if piece_data[:intersect_right] > stone_max_x_for_rails
+                stone_max_x_for_rails = piece_data[:intersect_right]
+              end
+
+              if trimmed_width < piece_data[:length_su] - 0.001 || trimmed_height < current_height_su - 0.001
+                trimmed_count += 1
+              end
+            end
+          end
+        end
+
+      end
+      # Only advance pos_y if not in single_row_mode (as it's fixed for single row)
+      # In multi-row mode, rows always build upward from the starting Y position
+      unless single_row_mode
+        pos_y += current_height_su + joint_width_su
+      end
+    end
+    
+    if !is_preview
+      trimmed_result = PARAMETRIX_TRIMMING.boolean2d_exact(face_group, face, face_matrix)
+      face_group = trimmed_result if trimmed_result
+    end
+    
+    # Create rails
+    rail_material = materials.length > 1 ? materials[1] : materials[0]
+    top_row_joint_positions.sort_by! { |p| p[:start] }
+    bottom_row_joint_positions.sort_by! { |p| p[:start] }
+    
+    if @@use_flat_grouping
+      create_rails_for_face(face_data, rails_group, rail_material, unit_conversion, face_index, cavity_distance_su, [face_data], local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su, top_row_joint_positions, bottom_row_joint_positions, stone_min_x_for_rails, stone_max_x_for_rails, joint_length_su)
+    else
+      rails_group = create_rails_for_face_original(face_data, layout_group, rail_material, unit_conversion, face_index, cavity_distance_su, [face_data], local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su, top_row_joint_positions, bottom_row_joint_positions, stone_min_x_for_rails, stone_max_x_for_rails, joint_length_su)
+    end
+
+    unit_name = get_effective_unit
+
+
+    # Make groups solid if not preview
+    if !is_preview && face_group.respond_to?(:entities) && face_group.valid? && face_group.entities.length > 0
+      face_group.entities.each { |e| e.make_unique if e.respond_to?(:make_unique) }
+    end
+    
+    return { elements: element_count, trimmed: trimmed_count, group: face_group, rails: rails_group }
+  end
+
+  def self.create_multi_face_unified_layout(multi_face_position, redo_mode = 0, options = {})
+    return 0 unless multi_face_position && multi_face_position.valid?
+
+    is_preview = options[:preview] || false
+    
+    begin
+      model = Sketchup.active_model
+      active_entities, context_name = get_proper_active_context
+
+      if is_preview
+        puts "[PARAMETRIX P-24] Creating preview with UNIFIED LAYOUT..."
+        remove_preview
+      else
+        model.start_operation("PARAMETRIX Layout", true)
+        puts "[PARAMETRIX P-24] Creating UNIFIED layout..."
+        remove_preview
+      end
+
+      unit_conversion = get_effective_unit_conversion
+      unit_name = get_effective_unit
+      
+      # Conditional parameter selection based on @@single_row_mode
+      if @@single_row_mode
+        length_values = parse_multi_values(@@single_row_length.to_s, @@single_row_randomize_lengths)
+        
+        height_values = parse_multi_values(@@single_row_height.to_s, false) # Height is always a single value for single row
+        thickness_su = @@single_row_thickness * unit_conversion
+        joint_length_su = @@single_row_joint_length * unit_conversion
+        joint_width_su = @@single_row_joint_width * unit_conversion
+        cavity_distance_su = @@single_row_cavity_distance * unit_conversion
+        pattern_type_for_face = @@single_row_pattern_type
+        randomize_lengths_for_face = @@single_row_randomize_lengths
+        randomize_heights_for_face = false # Always false for single row
+        layout_start_direction_for_face = @@layout_start_direction # Still use global layout start for vertical alignment of single row
+        start_row_height_index_for_face = 1 # Not relevant, but set to 1
+        puts "[PARAMETRIX] Single-Row Layout Mode ACTIVE. Using dedicated parameters."
+      else
+        length_values = parse_multi_values(@@length.to_s, @@randomize_lengths)
+        
+        height_values = parse_multi_values(@@height.to_s, @@randomize_heights)
+        thickness_su = @@thickness * unit_conversion
+        joint_length_su = @@joint_length * unit_conversion
+        joint_width_su = @@joint_width * unit_conversion
+        cavity_distance_su = @@cavity_distance * unit_conversion
+        pattern_type_for_face = @@pattern_type
+        randomize_lengths_for_face = @@randomize_lengths
+        randomize_heights_for_face = @@randomize_heights
+        layout_start_direction_for_face = @@layout_start_direction
+        start_row_height_index_for_face = @@start_row_height_index
+        puts "[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters."
+      end
+
+      # Default values if parsing results in empty arrays
+      if length_values.empty?
+        case unit_name
+        when "mm" then length_values = [1000.0]
+        when "cm" then length_values = [100.0]
+        when "m" then length_values = [1.0]
+        else length_values = [40.0]
+        end
+      end
+
+      if height_values.empty?
+        case unit_name
+        when "mm" then height_values = [620.0]
+        when "cm" then height_values = [62.0]
+        when "m" then height_values = [0.62]
+        else height_values = [24.4]
+        end
+      end
+      
+
+      puts "[PARAMETRIX] Original height values: [#{height_values.join(', ')}]"
+      puts "[PARAMETRIX] Height index requested: #{start_row_height_index_for_face}"
+      height_values = get_height_values_with_start_index(height_values, start_row_height_index_for_face)
+      puts "[PARAMETRIX] Final height pattern: [#{height_values.join(', ')}]"
+      
+      # Set global randomization seeds for synchronization
+      if @@synchronize_patterns
+        # Use separate seeds for length and height randomization
+        @global_length_seed = 12345
+        @global_height_seed = 54321
+      end
+
+      puts "[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ "
+      puts "[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING"
+      puts "[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ "
+      puts "[PARAMETRIX] Faces: #{multi_face_position.face_count}"
+      puts "[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)"
+      if @@single_row_mode
+        puts "[PARAMETRIX]   └─ Single-Row Layout Mode ACTIVE"
+      end
+
+      materials = create_materials(@@color_name, @@rail_color_name)
+
+      if @@use_flat_grouping
+        layout_group = active_entities.add_group
+        rails_group = active_entities.add_group
+        
+        if is_preview
+          layout_group.name = "PARAMETRIX P-24 Preview Layout"
+          rails_group.name = "PARAMETRIX P-24 Preview Rails"
+          @@preview_group = [layout_group, rails_group]
+        else
+          layout_group.name = "PARAMETRIX P-24 Layout"
+          rails_group.name = "PARAMETRIX P-24 Rails"
+        end
+      else
+        main_group = active_entities.add_group
+        
+        if is_preview
+          main_group.name = "PARAMETRIX P-24 Preview"
+          @@preview_group = main_group
+        else
+          main_group.name = "PARAMETRIX P-24 Layout"
+        end
+        
+        layout_group = main_group
+        rails_group = main_group
+      end
+
+      # Collect all faces data
+      all_faces_data = []
+      (0...multi_face_position.face_count).each do |face_index|
+        all_faces_data << multi_face_position.get_face_data(face_index)
+      end
+
+      # Calculate global unified bounds
+      unified_data = calculate_global_unified_bounds(all_faces_data, cavity_distance_su)
+      global_bounds = unified_data[:global_bounds]
+      reference_transform = unified_data[:reference_transform]
+      face_transforms = unified_data[:face_transforms]
+
+      avg_length = length_values.sum / length_values.length
+      avg_height = height_values.sum / height_values.length 
+      avg_length_su = avg_length * unit_conversion
+      avg_height_su = avg_height * unit_conversion
+
+      # Calculate unified start position based on global bounds
+      global_start_x, global_start_y, elements_x, elements_y = calculate_unified_start_position(
+        global_bounds, avg_length_su, avg_height_su, joint_length_su, joint_width_su, @@single_row_mode
+      )
+
+      # No artificial limits - let layout cover the full area
+      # elements_x and elements_y calculated based on actual face dimensions
+
+      total_elements = 0
+      total_trimmed = 0
+      face_results = []
+
+      # Process each face individually for complete coverage
+      face_transforms.each_with_index do |ft, face_index|
+        # Calculate individual layout parameters for THIS face
+        face_local_bounds = ft[:local_bounds]
+        
+        face_elements_x = ((face_local_bounds.width + joint_length_su) / (avg_length_su + joint_length_su)).ceil + 4
+        
+        face_elements_y = @@single_row_mode ? 1 : ((face_local_bounds.height + joint_width_su) / (avg_height_su + joint_width_su)).ceil + 4
+        
+        # Calculate face-specific start position based on layout direction
+        case layout_start_direction_for_face
+        when "top_left"
+          face_start_x = face_local_bounds.min.x - avg_length_su
+          face_start_y = face_local_bounds.max.y - face_elements_y * avg_height_su
+        when "top"
+          face_start_x = face_local_bounds.min.x + (face_local_bounds.width - face_elements_x * avg_length_su) / 2.0
+          face_start_y = face_local_bounds.max.y - face_elements_y * avg_height_su
+        when "top_right"
+          face_start_x = face_local_bounds.max.x - avg_length_su
+          face_start_y = face_local_bounds.max.y - face_elements_y * avg_height_su
+        when "left"
+          face_start_x = face_local_bounds.min.x - avg_length_su
+          face_start_y = face_local_bounds.min.y + (face_local_bounds.height - face_elements_y * avg_height_su) / 2.0
+        when "right"
+          face_start_x = face_local_bounds.max.x - avg_length_su
+          face_start_y = face_local_bounds.min.y + (face_local_bounds.height - face_elements_y * avg_height_su) / 2.0
+        when "bottom_left"
+          face_start_x = face_local_bounds.min.x - avg_length_su
+          face_start_y = face_local_bounds.min.y - avg_height_su
+        when "bottom"
+          face_start_x = face_local_bounds.min.x + (face_local_bounds.width - face_elements_x * avg_length_su) / 2.0
+          face_start_y = face_local_bounds.min.y - avg_height_su
+        when "bottom_right"
+          face_start_x = face_local_bounds.max.x - avg_length_su
+          face_start_y = face_local_bounds.min.y - avg_height_su
+        else # center or default
+          face_start_x = face_local_bounds.min.x + (face_local_bounds.width - face_elements_x * avg_length_su) / 2.0
+          face_start_y = face_local_bounds.min.y + (face_local_bounds.height - face_elements_y * avg_height_su) / 2.0
+        end
+        
+        # Ensure single-row mode uses correct Y positioning
+        if @@single_row_mode
+          face_start_y = face_local_bounds.min.y
+        end
+        
+        result = create_unified_layout_for_face(
+          ft, layout_group, rails_group, materials, unit_conversion, 
+          length_values, height_values, face_index, multi_face_position.face_count, 
+          cavity_distance_su, face_start_x, face_start_y, face_elements_x, face_elements_y,
+          joint_length_su, joint_width_su, avg_length_su, avg_height_su, thickness_su,
+          @@single_row_mode, layout_start_direction_for_face, is_preview
+        )
+
+        face_results << result
+        total_elements += result[:elements]
+        total_trimmed += result[:trimmed]
+      end
+
+      if !is_preview
+        model.commit_operation
+      end
+      
+      puts "[PARAMETRIX P-24] Layout completed: #{total_elements} elements created"
+      puts "TEST: Direction=#{layout_start_direction_for_face}, HeightIndex=#{start_row_height_index_for_face} → Elements=#{total_elements}, BottomRowHeight=#{height_values[0]}"
+
+      return 1
+
+    rescue => e
+      puts "[PARAMETRIX P-24] Error in layout creation: #{e.message}"
+      puts "[PARAMETRIX P-24] Backtrace: #{e.backtrace.first(3).join('\n')}"
+      if !is_preview
+        model.abort_operation if model
+      end
+      return 0
+    end
+  end
+
+end
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\loader.rb
+
+# PARAMETRIX Strong Loader P-24
+# Entry point with cache clearing and forced reload
+
+module PARAMETRIX
+  def self.force_reload
+    puts "[PARAMETRIX P-24] Force reloading all modules..."
+    
+    # Clear module constants to force reload
+    if defined?(PARAMETRIX)
+      PARAMETRIX.constants.each do |const|
+        PARAMETRIX.send(:remove_const, const) if PARAMETRIX.const_defined?(const)
+      end
+    end
+    
+    # Remove from loaded features to force fresh load
+    base_dir = File.dirname(__FILE__)
+    files_to_reload = [
+      'core.rb', 'preset_manager.rb', 'multi_face_position.rb', 
+      'ui_dialog_newui.rb', 'layout_engine.rb', 'commands.rb', 'toolbar.rb'
+    ]
+    
+    files_to_reload.each do |file|
+      full_path = File.join(base_dir, file)
+      $LOADED_FEATURES.delete_if { |f| f.include?(file) }
+      load full_path if File.exist?(full_path)
+    end
+    
+    puts "[PARAMETRIX P-24] All modules reloaded successfully"
+  end
+  
+  LOADER_VERSION = "P-24"
+end
+
+# Force reload and load all components
+PARAMETRIX.force_reload
+
+require File.join(__dir__, 'core.rb')
+require File.join(__dir__, 'preset_manager.rb')
+require File.join(__dir__, 'multi_face_position.rb')
+require File.join(__dir__, 'ui_dialog_newui.rb')
+require File.join(__dir__, 'layout_engine.rb')
+require File.join(__dir__, 'commands.rb')
+require File.join(__dir__, 'toolbar.rb')
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\multi_face_position.rb
+
+# PARAMETRIX Multi-Face Position Data Model
+# Manages face data and transformations for multi-face layouts
+
+class CladzPARAMETRIXMultiFacePosition
+  attr_accessor :faces, :matrices, :face_count
+  
+  def initialize
+    @faces = []
+    @matrices = []
+    @face_count = 0
+  end
+  
+  def add_face(face, matrix = Geom::Transformation.new)
+    @faces << face
+    @matrices << matrix
+    @face_count += 1
+  end
+  
+  def valid?
+    @face_count > 0 && @faces.all? { |face| face && face.valid? }
+  end
+  
+  def get_face_data(index)
+    return nil if index >= @face_count
+    { face: @faces[index], matrix: @matrices[index] }
+  end
+end
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\preset_manager.rb
+
+# PARAMETRIX Simple Preset Manager
+# All presets stored as individual JSON files in extension directory
+
+require 'json'
+
+module PARAMETRIX
+  module PresetManager
+    
+    PRESETS_DIR = File.join(__dir__, '..', '..', 'presets')
+    
+    def self.ensure_presets_directory
+      Dir.mkdir(PRESETS_DIR) unless Dir.exist?(PRESETS_DIR)
+      create_default_presets if Dir.empty?(PRESETS_DIR)
+    end
+    
+    def self.create_default_presets
+      defaults = {
+        "Brick Standard" => {
+          length: "800;900;1000",
+          height: "100;200",
+          thickness: 20.0,
+          joint_length: 3.0,
+          joint_width: 3.0,
+          pattern_type: "running_bond",
+          layout_start_direction: "bottom_left",
+          start_row_height_index: 1,
+          randomize_lengths: true,
+          randomize_heights: false,
+          cavity_distance: 75.0,
+          color_name: "PARAMETRIX-BRICK"
+        },
+        "Stone Ashlar" => {
+          length: "600;800;1000;1200",
+          height: "150;200;250",
+          thickness: 25.0,
+          joint_length: 5.0,
+          joint_width: 5.0,
+          pattern_type: "running_bond",
+          layout_start_direction: "center",
+          start_row_height_index: 2,
+          randomize_lengths: true,
+          randomize_heights: true,
+          cavity_distance: 75.0,
+          color_name: "PARAMETRIX-STONE",
+          enable_top_rail: true,
+          enable_bottom_rail: true
+        },
+        "Panel Stack" => {
+          length: "1200;1500",
+          height: "300;400;500",
+          thickness: 15.0,
+          joint_length: 2.0,
+          joint_width: 2.0,
+          pattern_type: "stack_bond",
+          layout_start_direction: "bottom",
+          start_row_height_index: 1,
+          randomize_lengths: false,
+          randomize_heights: false,
+          cavity_distance: 75.0,
+          color_name: "PARAMETRIX-PANEL"
+        }
+      }
+      
+      defaults.each do |name, data|
+        File.write(File.join(PRESETS_DIR, "#{name}.json"), JSON.pretty_generate(data))
+      end
+
+    end
+    
+    def self.save_preset(name, settings)
+      ensure_presets_directory
+      
+      preset_data = {
+        length: settings["length"].to_s,
+        height: settings["height"].to_s,
+        thickness: settings["thickness"].to_f,
+        joint_length: settings["joint_length"].to_f,
+        joint_width: settings["joint_width"].to_f,
+        cavity_distance: settings["cavity_distance"].to_f,
+        pattern_type: settings["pattern_type"].to_s,
+        layout_start_direction: settings["layout_start"].to_s,
+        start_row_height_index: settings["height_index"].to_i,
+        color_name: settings["material_name"].to_s,
+        randomize_lengths: !!settings["randomize_lengths"],
+        randomize_heights: !!settings["randomize_heights"],
+        enable_top_rail: !!settings["enable_top_rail"],
+        top_rail_thickness: settings["top_rail_thickness"].to_f,
+        top_rail_depth: settings["top_rail_depth"].to_f,
+        enable_bottom_rail: !!settings["enable_bottom_rail"],
+        bottom_rail_thickness: settings["bottom_rail_thickness"].to_f,
+        bottom_rail_depth: settings["bottom_rail_depth"].to_f,
+        rail_color_name: settings["rail_material_name"].to_s,
+        split_rails: !!settings["split_rails"],
+        synchronize_patterns: !!settings["synchronize_patterns"],
+        force_horizontal_layout: !!settings["force_horizontal"],
+        preserve_corners: !!settings["preserve_corners"],
+        single_row_mode: !!settings["single_row_mode"],
+        min_piece_length: settings["min_piece_length"].to_f
+      }
+      
+      file_path = File.join(PRESETS_DIR, "#{name}.json")
+      File.write(file_path, JSON.pretty_generate(preset_data))
+      true
+    rescue => e
+      false
+    end
+    
+    def self.load_preset(name)
+      file_path = File.join(PRESETS_DIR, "#{name}.json")
+      return nil unless File.exist?(file_path)
+      
+      JSON.parse(File.read(file_path), symbolize_names: true)
+    rescue => e
+      nil
+    end
+    
+    def self.delete_preset(name)
+      file_path = File.join(PRESETS_DIR, "#{name}.json")
+      return false unless File.exist?(file_path)
+      
+      File.delete(file_path)
+      true
+    rescue => e
+      false
+    end
+    
+    def self.list_presets
+      ensure_presets_directory
+      
+      presets = []
+      Dir.glob(File.join(PRESETS_DIR, "*.json")).each do |file|
+        presets << File.basename(file, ".json")
+      end
+      
+      presets.sort
+    end
+    
+    def self.apply_preset_to_globals(preset_data)
+      return false unless preset_data
+      
+      PARAMETRIX.class_variable_set(:@@length, preset_data[:length]) if preset_data[:length]
+      PARAMETRIX.class_variable_set(:@@height, preset_data[:height]) if preset_data[:height]
+      PARAMETRIX.class_variable_set(:@@thickness, preset_data[:thickness]) if preset_data[:thickness]
+      PARAMETRIX.class_variable_set(:@@joint_length, preset_data[:joint_length]) if preset_data[:joint_length]
+      PARAMETRIX.class_variable_set(:@@joint_width, preset_data[:joint_width]) if preset_data[:joint_width]
+      PARAMETRIX.class_variable_set(:@@cavity_distance, preset_data[:cavity_distance]) if preset_data[:cavity_distance]
+      PARAMETRIX.class_variable_set(:@@pattern_type, preset_data[:pattern_type]) if preset_data[:pattern_type]
+      PARAMETRIX.class_variable_set(:@@layout_start_direction, preset_data[:layout_start_direction]) if preset_data[:layout_start_direction]
+      PARAMETRIX.class_variable_set(:@@start_row_height_index, preset_data[:start_row_height_index]) if preset_data[:start_row_height_index]
+      PARAMETRIX.class_variable_set(:@@color_name, preset_data[:color_name]) if preset_data[:color_name]
+      PARAMETRIX.class_variable_set(:@@randomize_lengths, preset_data[:randomize_lengths]) if preset_data.key?(:randomize_lengths)
+      PARAMETRIX.class_variable_set(:@@randomize_heights, preset_data[:randomize_heights]) if preset_data.key?(:randomize_heights)
+      PARAMETRIX.class_variable_set(:@@enable_top_rail, preset_data[:enable_top_rail]) if preset_data.key?(:enable_top_rail)
+      PARAMETRIX.class_variable_set(:@@top_rail_thickness, preset_data[:top_rail_thickness]) if preset_data[:top_rail_thickness]
+      PARAMETRIX.class_variable_set(:@@top_rail_depth, preset_data[:top_rail_depth]) if preset_data[:top_rail_depth]
+      PARAMETRIX.class_variable_set(:@@enable_bottom_rail, preset_data[:enable_bottom_rail]) if preset_data.key?(:enable_bottom_rail)
+      PARAMETRIX.class_variable_set(:@@bottom_rail_thickness, preset_data[:bottom_rail_thickness]) if preset_data[:bottom_rail_thickness]
+      PARAMETRIX.class_variable_set(:@@bottom_rail_depth, preset_data[:bottom_rail_depth]) if preset_data[:bottom_rail_depth]
+      PARAMETRIX.class_variable_set(:@@rail_color_name, preset_data[:rail_color_name]) if preset_data[:rail_color_name]
+      PARAMETRIX.class_variable_set(:@@split_rails, preset_data[:split_rails]) if preset_data.key?(:split_rails)
+      PARAMETRIX.class_variable_set(:@@synchronize_patterns, preset_data[:synchronize_patterns]) if preset_data.key?(:synchronize_patterns)
+      PARAMETRIX.class_variable_set(:@@force_horizontal_layout, preset_data[:force_horizontal_layout]) if preset_data.key?(:force_horizontal_layout)
+      PARAMETRIX.class_variable_set(:@@preserve_corners, preset_data[:preserve_corners]) if preset_data.key?(:preserve_corners)
+      PARAMETRIX.class_variable_set(:@@single_row_mode, preset_data[:single_row_mode]) if preset_data.key?(:single_row_mode)
+      
+      true
+    end
+    
+  end
+end
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\toolbar.rb
+
+# PARAMETRIX Toolbar Creation
+
+begin
+  if defined?(PARAMETRIX)
+    toolbar = UI::Toolbar.new "PARAMETRIX"
+    
+    cmd = UI::Command.new("PARAMETRIX P-24 Layout Generator") {
+      begin
+        puts "[PARAMETRIX P-24] Toolbar command executed"
+        PARAMETRIX.start_layout_process
+      rescue => e
+        UI.messagebox("Error: #{e.message}")
+      end
+    }
+  else
+    puts "PARAMETRIX module not loaded, skipping toolbar creation"
+    return
+  end
+rescue => e
+  puts "Error creating toolbar: #{e.message}"
+  return
+end
+
+cmd.menu_text = "PARAMETRIX Layout Generator"
+cmd.tooltip = "Generate parametric cladding layouts with advanced trimming"
+cmd.status_bar_text = "Generate PARAMETRIX cladding layout"
+if defined?(cmd)
+  small_icon_path = "C:/Users/mshke/BACKUP_LAYOUTS/V121_LAYOUT_DISTRIBUTION/PARAMETRIX_EXTENSION/TB_V005_UNIFIED_16.png"
+  large_icon_path = "C:/Users/mshke/BACKUP_LAYOUTS/V121_LAYOUT_DISTRIBUTION/PARAMETRIX_EXTENSION/TB_V005_UNIFIED_24.png"
+  
+  cmd.small_icon = small_icon_path if File.exist?(small_icon_path)
+  cmd.large_icon = large_icon_path if File.exist?(large_icon_path)
+  cmd.menu_text = "PARAMETRIX P-24 Layout Generator"
+  cmd.tooltip = "Generate parametric cladding layouts with advanced trimming P-24"
+  cmd.status_bar_text = "Generate PARAMETRIX P-24 cladding layout"
+  
+  toolbar.add_item cmd
+  toolbar.show
+  
+  begin
+    menu = UI.menu("Extensions")
+    menu.add_item(cmd)
+    menu.add_separator
+    
+    help_cmd = UI::Command.new("PARAMETRIX Help & Documentation") {
+      extension_dir = File.dirname(File.dirname(__FILE__))
+      doc_path = File.join(extension_dir, "PARAMETRIX_Documentation.html")
+      if File.exist?(doc_path)
+        UI.openURL("file:///#{doc_path.gsub('\\', '/')}")
+      else
+        UI.messagebox("Documentation file not found")
+      end
+    }
+    help_cmd.menu_text = "PARAMETRIX Help & Documentation"
+    help_cmd.tooltip = "Open PARAMETRIX documentation in browser"
+    menu.add_item(help_cmd)
+  rescue
+  end
+end
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\trimming_v3.rb
+
+# PARAMETRIX Trimming V3 - Proper Layout Trimming Implementation
+
+module PARAMETRIX_TRIMMING
+
+  PARAMETRIX_TRIM_VERSION = "PARAMETRIX_TRIM_V3_1.0"
+
+  def self.boolean2d_exact(layout_group, original_face, face_matrix = nil)
+    begin
+
+      model = Sketchup.active_model
+      ents  = model.active_entities
+      return layout_group unless model && layout_group && original_face
+
+      faces = []
+      comps = []
+
+      model.selection.each do |e|
+        if e.class == Sketchup::Face
+          faces << e
+        end
+        if e.class == Sketchup::Group
+          comps << e
+        end
+        if e.class == Sketchup::ComponentInstance
+          comps << e
+        end
+      end
+
+      if faces.empty?
+        model.selection.each do |e|
+          if e.class == Sketchup::ComponentInstance
+            glued_face = e.glued_to
+            faces << glued_face if glued_face
+          end
+        end
+      end
+
+      return layout_group if faces.empty?
+
+      gp = ents.add_group
+      gents = gp.entities
+
+      # Use face_clone method for proper hole handling
+      face_clone(gents, faces)
+
+      boundary_face = gents.grep(Sketchup::Face).first
+      unless boundary_face && boundary_face.valid?
+        gp.erase! rescue nil
+        return layout_group
+      end
+
+      # Ensure same normal direction
+      boundary_face.reverse! if boundary_face.normal.dot(original_face.normal) < 0
+
+      # Add layout entities to intersect (this is where the trimming happens)
+      layout_ents = layout_group.entities
+
+      # The key: intersect_with creates the proper trimmed geometry
+      layout_ents.intersect_with(
+        true,                               # self_intersect: true for proper cutting
+        layout_group.transformation,        # Transform for layout entities
+        gents,                             # Entities to intersect with (boundary)
+        gp.transformation,                 # Transform for boundary entities
+        false,                             # solids_only: false for 2D trimming
+        []                                 # entities_to_exclude
+      )
+
+      faces_to_remove = []
+      layout_ents.grep(Sketchup::Face).each do |f|
+        # Use robust point-in-polygon check instead of unreliable PointOutside
+        unless self.is_point_inside_face_with_holes(boundary_face, f.bounds.center.transform(gp.transformation.inverse))
+          faces_to_remove << f
+        end
+      end
+
+      layout_ents.erase_entities(faces_to_remove)
+
+      lonely_edges = []
+      layout_ents.grep(Sketchup::Edge).each do |edge|
+        lonely_edges << edge if edge.faces.empty?
+      end
+      layout_ents.erase_entities(lonely_edges) unless lonely_edges.empty?
+
+      gp.erase! rescue nil
+
+      # Convert to proper 2D cutting component
+      inst = layout_group.to_component
+      defn = inst.definition
+      be = defn.behavior
+      be.is2d = true
+      be.cuts_opening = true
+      be.snapto = 0
+      defn.invalidate_bounds
+
+      inst.name = "PARAMETRIX Layout"
+      defn.name = "PARAMETRIX Layout Def"
+
+      return inst
+
+    rescue => e
+      begin; gp.erase! if gp && gp.respond_to?(:erase!); rescue; end
+      return layout_group
+    end
+  end
+
+  # Face cloning method (handles holes properly)
+  def self.face_clone(gents, faces)
+    faces2go = []
+
+    faces.each do |face|
+      # Create faces for all loops (outer + inner holes)
+      face.loops.each { |loop| gents.add_face(loop.vertices) }
+
+      # Re-add outer face to ensure proper structure
+      oface = gents.add_face(face.outer_loop.vertices)
+
+      # Find and mark internal faces for removal
+      gents.each do |f|
+        next if f.class != Sketchup::Face
+        f.edges.each do |e|
+          if e.faces.length > 1
+            faces2go << f
+            break
+          end
+        end
+      end
+    end
+
+    gents.erase_entities(faces2go) # Remove internal faces (holes)
+  end
+
+  # Robust point-in-face check that handles holes properly
+  def self.is_point_inside_face_with_holes(face, local_point)
+    # Check against outer boundary
+    outer_loop = face.outer_loop
+    return false unless self.is_point_in_loop(outer_loop, local_point)
+    
+    # Check against inner loops (holes) - point must NOT be inside any hole
+    face.loops.each do |loop|
+      next if loop == outer_loop
+      return false if self.is_point_in_loop(loop, local_point)
+    end
+    
+    true
+  end
+
+  # Ray casting algorithm for point-in-polygon
+  def self.is_point_in_loop(loop, local_point)
+    point = local_point.to_a
+    vertices = loop.vertices.map { |v| v.position.to_a }
+    x, y = point[0], point[1]
+    
+    inside = false
+    j = vertices.length - 1
+    
+    vertices.each_with_index do |vertex, i|
+      xi, yi = vertex[0], vertex[1]
+      xj, yj = vertices[j][0], vertices[j][1]
+      
+      if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+        inside = !inside
+      end
+      
+      j = i
+    end
+    
+    inside
+  end
+
+end
+
+-------------------------------------------
+FILE: F:\BACKUP_LAYOUTS\PARAMETRIX_EXTENSION\lib\PARAMETRIX\ui_dialog_newui.rb
+
+# PARAMETRIX UI Dialog Management - NEW UI
+# Handles HTML dialog display and parameter management with improved interface
+
+module PARAMETRIX
+
+  def self.show_html_dialog(multi_face_position)
+    @@current_multi_face_position = multi_face_position
+    
+    unit_name = get_effective_unit
+    
+    html = <<-HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PARAMETRIX Layout Generator</title>
+    <style>
+        /* Embedded Tailwind-like CSS for offline functionality */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        .flex { display: flex; }
+        .flex-col { flex-direction: column; }
+        .grid { display: grid; }
+        .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+        .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .gap-2 { gap: 0.5rem; }
+        .gap-3 { gap: 0.75rem; }
+        .gap-4 { gap: 1rem; }
+        .mb-1 { margin-bottom: 0.25rem; }
+        .mb-2 { margin-bottom: 0.5rem; }
+        .mb-3 { margin-bottom: 0.75rem; }
+        .mr-2 { margin-right: 0.5rem; }
+        .mt-1 { margin-top: 0.25rem; }
+        .p-2 { padding: 0.5rem; }
+        .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
+        .px-4 { padding-left: 1rem; padding-right: 1rem; }
+        .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+        .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+        .text-xs { font-size: 0.75rem; }
+        .text-sm { font-size: 0.875rem; }
+        .font-medium { font-weight: 500; }
+        .font-semibold { font-weight: 600; }
+        .text-white { color: #ffffff; }
+        .text-gray-600 { color: #6b7280; }
+        .text-gray-700 { color: #374151; }
+        .text-charcoal { color: #1f2937; }
+        .bg-charcoal { background-color: #1f2937; }
+        .bg-charcoal-light { background-color: #374151; }
+        .bg-cobalt { background-color: #1e40af; }
+        .bg-cobalt-light { background-color: #3b82f6; }
+        .hover\\:bg-charcoal:hover { background-color: #1f2937; }
+        .hover\\:bg-cobalt:hover { background-color: #1e40af; }
+        .tab-active { 
+            background: #1f2937;
+            color: white;
+            border: 1px solid #1f2937;
+        }
+        .tab-inactive { 
+            background: #f9fafb;
+            color: #6b7280;
+            border: 1px solid #d1d5db;
+        }
+        .tab-inactive:hover { 
+            background: #f3f4f6;
+            color: #374151;
+            border: 1px solid #9ca3af;
+        }
+        .disabled { opacity: 0.5; pointer-events: none; }
+        .success-toast { position: fixed; top: 20px; right: 20px; background: #10b981; color: white; padding: 12px 20px; border-radius: 8px; z-index: 1000; animation: slideIn 0.3s ease; }
+        @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+        .bg-gray-600 { background-color: #4b5563; }
+        .bg-gray-700 { background-color: #374151; }
+        .border { border-width: 1px; }
+        .border-gray-300 { border-color: #d1d5db; }
+        .rounded { border-radius: 0.25rem; }
+        .rounded-lg { border-radius: 0.5rem; }
+        .shadow-lg { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
+        .hover\\:bg-blue-700:hover { background-color: #1d4ed8; }
+        .hover\\:bg-green-700:hover { background-color: #15803d; }
+        .hover\\:bg-gray-700:hover { background-color: #374151; }
+        .cursor-pointer { cursor: pointer; }
+        .w-full { width: 100%; }
+        .h-4 { height: 1rem; }
+        .w-4 { width: 1rem; }
+        .justify-center { justify-content: center; }
+        .items-center { align-items: center; }
+        .col-span-2 { grid-column: span 2 / span 2; }
+        .block { display: block; }
+        .transition { transition-property: all; transition-duration: 150ms; }
+    </style>
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #f0f0f0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .dialog-container {
+            width: 100%;
+            max-width: 500px;
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            max-height: 90vh; 
+        }
+
+        .content-area {
+            overflow-y: auto;
+            padding: 15px;
+            flex-grow: 1;
+        }
+        .setting-group {
+            margin-bottom: 15px;
+            padding: 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            background: #fafafa;
+        }
+        .setting-group-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #e5e7eb;
+            letter-spacing: 0.025em;
+        }
+        .dialog-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #1f2937;
+            text-align: center;
+            margin-bottom: 20px;
+            letter-spacing: 0.05em;
+        }
+        .tooltip {
+            position: relative;
+            display: inline-block;
+        }
+        .tooltip .tooltiptext {
+            visibility: hidden;
+            width: 200px;
+            background-color: #333;
+            color: #fff;
+            text-align: center;
+            border-radius: 4px;
+            padding: 5px;
+            position: absolute;
+            z-index: 1;
+            bottom: 125%;
+            left: 50%;
+            margin-left: -100px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            font-size: 11px;
+        }
+        .tooltip:hover .tooltiptext {
+            visibility: visible;
+            opacity: 1;
+        }
+        .help-icon {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            background: #6b7280;
+            color: white;
+            border-radius: 50%;
+            text-align: center;
+            font-size: 10px;
+            line-height: 14px;
+            margin-left: 4px;
+            cursor: help;
+        }
+        .form-field input[type="text"], .form-field select {
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 13px;
+            width: 100%;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .form-field input[type="text"]:focus, .form-field select:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+            outline: none;
+        }
+
+        .dialog-footer a {
+            color: #94a3b8;
+            text-decoration: none;
+            margin: 0 5px;
+        }
+
+    </style>
+</head>
+<body>
+
+<div class="dialog-container">
+    <div class="content-area">
+        <!-- Preset Manager at Top -->
+        <div class="setting-group">
+            <div class="setting-group-title">Quick Presets</div>
+            <div class="grid grid-cols-2 gap-2 mb-3">
+                <select id="preset_dropdown" class="form-field rounded-lg" style="padding: 8px 12px; font-size: 13px;">
+                    <option value="">Select a preset...</option>
+                </select>
+                <button id="load_preset_btn" class="px-3 py-2 bg-charcoal text-white rounded text-xs hover:bg-charcoal-light w-full">Load Preset</button>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+                <input type="text" id="preset_name" placeholder="Preset Name" class="form-field rounded-lg" style="padding: 8px 12px; font-size: 13px; opacity: 0.7;" />
+                <button id="save_preset_btn" class="px-3 py-2 bg-charcoal text-white rounded text-xs hover:bg-charcoal-light">Save Preset</button>
+            </div>
+        </div>
+
+        <div class="dialog-title">PARAMETRIX P-24</div>
+        <div style="text-align: center; font-size: 10px; color: #9ca3af; opacity: 0.6; margin-top: -10px; margin-bottom: 15px;">P-24 | Developed by: Int. Arch. M.Shkeir</div>
+        
+        <!-- Layout Tabs -->
+        <div class="setting-group">
+            <div class="setting-group-title">Layout Mode</div>
+            <div class="flex gap-3 justify-center">
+                <button id="multi_row_tab" class="px-8 py-3 text-sm font-medium tab-active transition" style="min-width: 140px;">Multi-Row Layout</button>
+                <button id="single_row_tab" class="px-8 py-3 text-sm font-medium tab-inactive transition" style="min-width: 140px;">Single-Row Layout</button>
+            </div>
+        </div>
+        <!-- Panel Dimensions & Joints -->
+        <div class="setting-group">
+            <div class="setting-group-title">Panel Dimensions & Joints (Units in #{unit_name})</div>
+                <div class="grid grid-cols-2 gap-x-4 gap-y-3">
+                    <div class="form-field col-span-2">
+                        <label for="length" class="text-xs font-medium text-gray-600 mb-1 block">Panel Lengths (Semicolon-Separated List: e.g., 800;1000)</label>
+                        <input type="text" id="length" value="#{@@length}" class="rounded-lg" />
+                    </div>
+                    <div class="form-field col-span-2">
+                        <label for="height" class="text-xs font-medium text-gray-600 mb-1 block">Panel Heights (Semicolon-Separated List: e.g., 100;200)</label>
+                        <input type="text" id="height" value="#{@@height}" class="rounded-lg" />
+                    </div>
+                    <div class="form-field">
+                        <label for="thickness" class="text-xs font-medium text-gray-600 mb-1 block">Panel Thickness (#{unit_name})</label>
+                        <input type="text" id="thickness" value="#{@@thickness}" class="rounded-lg" />
+                    </div>
+                    <div class="form-field">
+                        <label for="joint_length" class="text-xs font-medium text-gray-600 mb-1 block">Horizontal Joints (mm)</label>
+                        <input type="text" id="joint_length" value="#{@@joint_length}" class="rounded-lg" />
+                    </div>
+                    <div class="form-field">
+                        <label for="joint_width" class="text-xs font-medium text-gray-600 mb-1 block">Vertical Joints (mm)</label>
+                        <input type="text" id="joint_width" value="#{@@joint_width}" class="rounded-lg" />
+                    </div>
+                    <div class="form-field">
+                        <label for="cavity_distance" class="text-xs font-medium text-gray-600 mb-1 block">Cavity Distance</label>
+                        <input type="text" id="cavity_distance" value="75" />
+                    </div>
+                    <div class="form-field">
+                        <label for="min_piece_length" class="text-xs font-medium text-gray-600 mb-1 block">Min Piece Length (#{unit_name})</label>
+                        <input type="text" id="min_piece_length" value="#{@@enable_min_piece_length ? @@min_piece_length : 0}" />
+                    </div>
+                    <div class="form-field col-span-2">
+                        <label for="color_name" class="text-xs font-medium text-gray-600 mb-1 block">Material Name</label>
+                        <input type="text" id="color_name" value="#{@@color_name}" />
+                    </div>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <div class="setting-group-title">Pattern, Placement & Randomization</div>
+                <div class="grid grid-cols-2 gap-x-4 gap-y-3">
+                    <div class="form-field">
+                        <label for="pattern_type" class="text-xs font-medium text-gray-600 mb-1 block">Pattern Type</label>
+                        <select id="pattern_type">
+                            <option value="running_bond" #{@@pattern_type == 'running_bond' ? 'selected' : ''}>Running Bond</option>
+                            <option value="stack_bond" #{@@pattern_type == 'stack_bond' ? 'selected' : ''}>Stack Bond</option>
+                        </select>
+                    </div>
+                    <div class="form-field col-span-2">
+                        <label for="layout_start_direction" class="text-xs font-medium text-gray-600 mb-1 block">
+                            Layout Start Direction
+                            <span class="tooltip">
+                                <span class="help-icon">?</span>
+                                <span class="tooltiptext">Controls where the layout pattern starts. Layout always builds upward and rightward from the start position.</span>
+                            </span>
+                        </label>
+                        <select id="layout_start_direction">
+                            <option value="center" #{@@layout_start_direction == 'center' ? 'selected' : ''}>Center</option>
+                            <option value="top_left" #{@@layout_start_direction == 'top_left' ? 'selected' : ''}>Top Left</option>
+                            <option value="top" #{@@layout_start_direction == 'top' ? 'selected' : ''}>Top</option>
+                            <option value="top_right" #{@@layout_start_direction == 'top_right' ? 'selected' : ''}>Top Right</option>
+                            <option value="left" #{@@layout_start_direction == 'left' ? 'selected' : ''}>Left</option>
+                            <option value="right" #{@@layout_start_direction == 'right' ? 'selected' : ''}>Right</option>
+                            <option value="bottom_left" #{@@layout_start_direction == 'bottom_left' ? 'selected' : ''}>Bottom Left</option>
+                            <option value="bottom" #{@@layout_start_direction == 'bottom' ? 'selected' : ''}>Bottom</option>
+                            <option value="bottom_right" #{@@layout_start_direction == 'bottom_right' ? 'selected' : ''}>Bottom Right</option>
+                        </select>
+                    </div>
+                    <div class="form-field col-span-2" id="height_index_field">
+                        <label for="height_index" class="text-xs font-medium text-gray-600 mb-1 block">
+                            First Row Height Index
+                            <span class="tooltip">
+                                <span class="help-icon">?</span>
+                                <span class="tooltiptext">Which height from your list to use for the bottom row (1-based). Example: if heights are [100,200,300] and index is 2, bottom row uses 200.</span>
+                            </span>
+                        </label>
+                        <input type="text" id="height_index" value="#{@@start_row_height_index}" placeholder="1" />
+                    </div>
+                    <div class="col-span-2 flex items-center mt-1">
+                        <input type="checkbox" id="randomize_lengths" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@randomize_lengths ? 'checked' : ''} />
+                        <label for="randomize_lengths" class="text-sm text-gray-700">Randomize Panel Lengths</label>
+                    </div>
+                    <div class="col-span-2 flex items-center" id="randomize_heights_field">
+                        <input type="checkbox" id="randomize_heights" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@randomize_heights ? 'checked' : ''} />
+                        <label for="randomize_heights" class="text-sm text-gray-700">Randomize Panel Heights</label>
+                    </div>
+                </div>
+            </div>
+
+
+
+            <div class="setting-group">
+                <div class="setting-group-title">Multi-Face & Corner Options</div>
+                <div class="flex flex-col gap-2">
+                    <div class="flex items-center">
+                        <input type="checkbox" id="synchronize_patterns" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@synchronize_patterns ? 'checked' : ''} />
+                        <label for="synchronize_patterns" class="text-sm text-gray-700">
+                            Synchronize Patterns
+                            <span class="tooltip">
+                                <span class="help-icon">?</span>
+                                <span class="tooltiptext">Creates seamless layout across all selected faces</span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="flex items-center">
+                        <input type="checkbox" id="force_horizontal" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@force_horizontal_layout ? 'checked' : ''} />
+                        <label for="force_horizontal" class="text-sm text-gray-700">
+                            Force Horizontal Layout
+                            <span class="tooltip">
+                                <span class="help-icon">?</span>
+                                <span class="tooltiptext">Ignores face tilt and forces horizontal orientation</span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="flex items-center">
+                        <input type="checkbox" id="preserve_corners" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@preserve_corners ? 'checked' : ''} />
+                        <label for="preserve_corners" class="text-sm text-gray-700">
+                            Preserve Corners
+                            <span class="tooltip">
+                                <span class="help-icon">?</span>
+                                <span class="tooltiptext">Generates unique corner pieces for better fit</span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="flex items-center">
+                        <input type="checkbox" id="use_flat_grouping" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@use_flat_grouping ? 'checked' : ''} />
+                        <label for="use_flat_grouping" class="text-sm text-gray-700">
+                            Flat Grouping (Solid Groups)
+                            <span class="tooltip">
+                                <span class="help-icon">?</span>
+                                <span class="tooltiptext">Creates separate solid groups for layout and rails</span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <div class="setting-group-title">Rail Settings</div>
+                <div class="grid grid-cols-2 gap-x-4 gap-y-3">
+                    <div class="flex flex-col">
+                        <div class="flex items-center mb-2">
+                            <input type="checkbox" id="enable_top_rail_multi" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@enable_top_rail ? 'checked' : ''} />
+                            <label for="enable_top_rail_multi" class="text-sm font-semibold text-gray-700">Enable Top Rail</label>
+                        </div>
+                        <div class="form-field mb-2">
+                            <label for="top_rail_thickness_multi" class="text-xs font-medium text-gray-600 mb-1 block">Top Rail Thickness</label>
+                            <input type="text" id="top_rail_thickness_multi" value="#{@@top_rail_thickness}" />
+                        </div>
+                        <div class="form-field">
+                            <label for="top_rail_depth_multi" class="text-xs font-medium text-gray-600 mb-1 block">Top Rail Depth</label>
+                            <input type="text" id="top_rail_depth_multi" value="#{@@top_rail_depth}" />
+                        </div>
+                    </div>
+                    <div class="flex flex-col">
+                        <div class="flex items-center mb-2">
+                            <input type="checkbox" id="enable_bottom_rail_multi" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@enable_bottom_rail ? 'checked' : ''} />
+                            <label for="enable_bottom_rail_multi" class="text-sm font-semibold text-gray-700">Enable Bottom Rail</label>
+                        </div>
+                        <div class="form-field mb-2">
+                            <label for="bottom_rail_thickness_multi" class="text-xs font-medium text-gray-600 mb-1 block">Bottom Rail Thickness</label>
+                            <input type="text" id="bottom_rail_thickness_multi" value="#{@@bottom_rail_thickness}" />
+                        </div>
+                        <div class="form-field">
+                            <label for="bottom_rail_depth_multi" class="text-xs font-medium text-gray-600 mb-1 block">Bottom Rail Depth</label>
+                            <input type="text" id="bottom_rail_depth_multi" value="#{@@bottom_rail_depth}" />
+                        </div>
+                    </div>
+                    <div class="flex flex-col">
+                        <div class="flex items-center mb-2">
+                            <input type="checkbox" id="enable_left_rail_multi" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@enable_left_rail ? 'checked' : ''} />
+                            <label for="enable_left_rail_multi" class="text-sm font-semibold text-gray-700">Enable Left Rail</label>
+                        </div>
+                        <div class="form-field mb-2">
+                            <label for="left_rail_thickness_multi" class="text-xs font-medium text-gray-600 mb-1 block">Left Rail Thickness</label>
+                            <input type="text" id="left_rail_thickness_multi" value="#{@@left_rail_thickness}" />
+                        </div>
+                        <div class="form-field">
+                            <label for="left_rail_depth_multi" class="text-xs font-medium text-gray-600 mb-1 block">Left Rail Depth</label>
+                            <input type="text" id="left_rail_depth_multi" value="#{@@left_rail_depth}" />
+                        </div>
+                    </div>
+                    <div class="flex flex-col">
+                        <div class="flex items-center mb-2">
+                            <input type="checkbox" id="enable_right_rail_multi" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@enable_right_rail ? 'checked' : ''} />
+                            <label for="enable_right_rail_multi" class="text-sm font-semibold text-gray-700">Enable Right Rail</label>
+                        </div>
+                        <div class="form-field mb-2">
+                            <label for="right_rail_thickness_multi" class="text-xs font-medium text-gray-600 mb-1 block">Right Rail Thickness</label>
+                            <input type="text" id="right_rail_thickness_multi" value="#{@@right_rail_thickness}" />
+                        </div>
+                        <div class="form-field">
+                            <label for="right_rail_depth_multi" class="text-xs font-medium text-gray-600 mb-1 block">Right Rail Depth</label>
+                            <input type="text" id="right_rail_depth_multi" value="#{@@right_rail_depth}" />
+                        </div>
+                    </div>
+                    <div class="col-span-2 flex items-center mt-2">
+                        <input type="checkbox" id="split_rails_multi" class="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" #{@@split_rails ? 'checked' : ''} />
+                        <label for="split_rails_multi" class="text-sm font-semibold text-gray-700">Split Rails into Pieces</label>
+                    </div>
+                    <div class="form-field col-span-2">
+                        <label for="rail_material_name_multi" class="text-xs font-medium text-gray-600 mb-1 block">Rail Material Name</label>
+                        <input type="text" id="rail_material_name_multi" value="#{@@rail_color_name}" />
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Action Buttons -->
+        <div class="setting-group">
+            <div class="flex justify-center gap-4 w-full mb-3">
+                <button id="previewBtn" class="px-4 py-2 bg-gray-600 text-white font-medium rounded shadow hover:bg-gray-700 transition text-sm w-full">Preview Layout</button>
+                <button id="generateBtn" class="px-4 py-2 bg-charcoal text-white font-medium rounded shadow hover:bg-charcoal-light transition text-sm w-full">Generate Layout</button>
+            </div>
+            <div class="flex justify-center">
+                <button id="helpBtn" class="px-3 py-1 bg-gray-500 text-white text-xs rounded hover:bg-gray-600 transition">📖 Help & Documentation</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Global variables
+    let currentMode = 'multi_row';
+    
+    // Tab functionality
+    function switchTab(mode) {
+        currentMode = mode;
+        const multiTab = document.getElementById('multi_row_tab');
+        const singleTab = document.getElementById('single_row_tab');
+        
+        if (mode === 'multi_row') {
+            multiTab.className = 'px-8 py-3 text-sm font-medium tab-active transition';
+            singleTab.className = 'px-8 py-3 text-sm font-medium tab-inactive transition';
+        } else {
+            multiTab.className = 'px-8 py-3 text-sm font-medium tab-inactive transition';
+            singleTab.className = 'px-8 py-3 text-sm font-medium tab-active transition';
+        }
+        toggleSingleRowFields();
+    }
+    
+    function toggleSingleRowFields() {
+        const isSingleRow = currentMode === 'single_row';
+        const heightIndexField = document.getElementById('height_index_field');
+        const randomizeHeightsField = document.getElementById('randomize_heights_field');
+        
+        if (isSingleRow) {
+            heightIndexField.classList.add('disabled');
+            randomizeHeightsField.classList.add('disabled');
+            document.getElementById('height_index').disabled = true;
+            document.getElementById('randomize_heights').disabled = true;
+        } else {
+            heightIndexField.classList.remove('disabled');
+            randomizeHeightsField.classList.remove('disabled');
+            document.getElementById('height_index').disabled = false;
+            document.getElementById('randomize_heights').disabled = false;
+        }
+    }
+    
+    document.addEventListener('DOMContentLoaded', function() {
+        sketchup.get_user_presets();
+        setTimeout(function() { sketchup.get_user_presets(); }, 100);
+        
+        // Set up tab event listeners
+        document.getElementById('multi_row_tab').addEventListener('click', () => switchTab('multi_row'));
+        document.getElementById('single_row_tab').addEventListener('click', () => switchTab('single_row'));
+        
+        // Initial setup
+        toggleSingleRowFields();
+    });
+
+    function collectSettings() {
+        const isSingleRow = currentMode === 'single_row';
+        
+        return {
+            single_row_mode: isSingleRow,
+            length: document.getElementById('length').value || '',
+            height: document.getElementById('height').value || '',
+            thickness: parseFloat(document.getElementById('thickness').value) || 0,
+            joint_length: parseFloat(document.getElementById('joint_length').value) || 0,
+            joint_width: parseFloat(document.getElementById('joint_width').value) || 0,
+            cavity_distance: parseFloat(document.getElementById('cavity_distance').value) || 0,
+            pattern_type: document.getElementById('pattern_type').value || 'running_bond',
+            layout_start: document.getElementById('layout_start_direction').value || 'center',
+            height_index: parseInt(document.getElementById('height_index').value) || 1,
+            material_name: document.getElementById('color_name').value || '',
+            randomize_lengths: document.getElementById('randomize_lengths').checked,
+            randomize_heights: document.getElementById('randomize_heights').checked,
+            enable_top_rail: document.getElementById('enable_top_rail_multi').checked,
+            top_rail_thickness: parseFloat(document.getElementById('top_rail_thickness_multi').value) || 0,
+            top_rail_depth: parseFloat(document.getElementById('top_rail_depth_multi').value) || 0,
+            enable_bottom_rail: document.getElementById('enable_bottom_rail_multi').checked,
+            bottom_rail_thickness: parseFloat(document.getElementById('bottom_rail_thickness_multi').value) || 0,
+            bottom_rail_depth: parseFloat(document.getElementById('bottom_rail_depth_multi').value) || 0,
+            enable_left_rail: document.getElementById('enable_left_rail_multi').checked,
+            left_rail_thickness: parseFloat(document.getElementById('left_rail_thickness_multi').value) || 0,
+            left_rail_depth: parseFloat(document.getElementById('left_rail_depth_multi').value) || 0,
+            enable_right_rail: document.getElementById('enable_right_rail_multi').checked,
+            right_rail_thickness: parseFloat(document.getElementById('right_rail_thickness_multi').value) || 0,
+            right_rail_depth: parseFloat(document.getElementById('right_rail_depth_multi').value) || 0,
+            rail_material_name: document.getElementById('rail_material_name_multi').value || '',
+            split_rails: document.getElementById('split_rails_multi').checked,
+            synchronize_patterns: document.getElementById('synchronize_patterns').checked,
+            force_horizontal: document.getElementById('force_horizontal').checked,
+            preserve_corners: document.getElementById('preserve_corners').checked,
+            use_flat_grouping: document.getElementById('use_flat_grouping').checked,
+            min_piece_length: parseFloat(document.getElementById('min_piece_length').value) || 0
+        };
+    }
+
+    document.getElementById('generateBtn').addEventListener('click', function() {
+        const settings = collectSettings();
+        sketchup.apply_settings(JSON.stringify(settings));
+    });
+
+    document.getElementById('helpBtn').addEventListener('click', function() {
+        sketchup.open_documentation();
+    });
+
+    document.getElementById('previewBtn').addEventListener('click', function() {
+        const settings = collectSettings();
+        settings.preview = true;
+        sketchup.apply_settings(JSON.stringify(settings));
+    });
+
+    // Load preset button
+    document.getElementById('load_preset_btn').addEventListener('click', function() {
+        const selectedPreset = document.getElementById('preset_dropdown').value;
+        if (!selectedPreset) {
+            alert('Please select a preset first');
+            return;
+        }
+        sketchup.load_preset(selectedPreset);
+    });
+    
+
+    
+    // Auto-load preset when dropdown changes
+    document.getElementById('preset_dropdown').addEventListener('change', function() {
+        const selectedPreset = this.value;
+        if (selectedPreset) {
+            sketchup.load_preset(selectedPreset);
+        }
+    });
+
+    // Save preset button
+    document.getElementById('save_preset_btn').addEventListener('click', function() {
+        const name = document.getElementById('preset_name').value.trim();
+        if (!name) {
+            alert('Please enter a preset name');
+            return;
+        }
+        
+        // Validate that we have actual values, not placeholders
+        const lengthVal = document.getElementById('length').value;
+        const heightVal = document.getElementById('height').value;
+        
+        if (!lengthVal || lengthVal === 'length' || !heightVal || heightVal === 'height') {
+            alert('Please fill in the panel dimensions before saving a preset.');
+            return;
+        }
+        
+        const settings = collectSettings();
+        console.log('Saving preset with settings:', settings);
+        sketchup.save_preset(name, JSON.stringify(settings));
+        document.getElementById('preset_name').value = '';
+        
+        // Show success toast
+        const toast = document.createElement('div');
+        toast.className = 'success-toast';
+        toast.textContent = '✓ Preset saved successfully!';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+        
+        setTimeout(function() { sketchup.get_user_presets(); }, 100);
+    });
+
+    // Function to update UI with preset data
+    function applyPresetToUI(presetData) {
+        if (presetData.length) document.getElementById('length').value = presetData.length;
+        if (presetData.height) document.getElementById('height').value = presetData.height;
+        if (presetData.thickness) document.getElementById('thickness').value = presetData.thickness;
+        if (presetData.joint_length) document.getElementById('joint_length').value = presetData.joint_length;
+        if (presetData.joint_width) document.getElementById('joint_width').value = presetData.joint_width;
+        if (presetData.cavity_distance) document.getElementById('cavity_distance').value = presetData.cavity_distance;
+        if (presetData.pattern_type) document.getElementById('pattern_type').value = presetData.pattern_type;
+        if (presetData.layout_start_direction) document.getElementById('layout_start_direction').value = presetData.layout_start_direction;
+        if (presetData.start_row_height_index) document.getElementById('height_index').value = presetData.start_row_height_index;
+        if (presetData.color_name) document.getElementById('color_name').value = presetData.color_name;
+        if (presetData.hasOwnProperty('randomize_lengths')) document.getElementById('randomize_lengths').checked = presetData.randomize_lengths;
+        if (presetData.hasOwnProperty('randomize_heights')) document.getElementById('randomize_heights').checked = presetData.randomize_heights;
+        
+        // Layout mode
+        if (presetData.hasOwnProperty('single_row_mode')) {
+            switchTab(presetData.single_row_mode ? 'single_row' : 'multi_row');
+        }
+        
+        // Rail settings
+        if (presetData.hasOwnProperty('enable_top_rail')) document.getElementById('enable_top_rail_multi').checked = presetData.enable_top_rail;
+        if (presetData.top_rail_thickness) document.getElementById('top_rail_thickness_multi').value = presetData.top_rail_thickness;
+        if (presetData.top_rail_depth) document.getElementById('top_rail_depth_multi').value = presetData.top_rail_depth;
+        if (presetData.hasOwnProperty('enable_bottom_rail')) document.getElementById('enable_bottom_rail_multi').checked = presetData.enable_bottom_rail;
+        if (presetData.bottom_rail_thickness) document.getElementById('bottom_rail_thickness_multi').value = presetData.bottom_rail_thickness;
+        if (presetData.bottom_rail_depth) document.getElementById('bottom_rail_depth_multi').value = presetData.bottom_rail_depth;
+        if (presetData.hasOwnProperty('enable_left_rail')) document.getElementById('enable_left_rail_multi').checked = presetData.enable_left_rail;
+        if (presetData.left_rail_thickness) document.getElementById('left_rail_thickness_multi').value = presetData.left_rail_thickness;
+        if (presetData.left_rail_depth) document.getElementById('left_rail_depth_multi').value = presetData.left_rail_depth;
+        if (presetData.hasOwnProperty('enable_right_rail')) document.getElementById('enable_right_rail_multi').checked = presetData.enable_right_rail;
+        if (presetData.right_rail_thickness) document.getElementById('right_rail_thickness_multi').value = presetData.right_rail_thickness;
+        if (presetData.right_rail_depth) document.getElementById('right_rail_depth_multi').value = presetData.right_rail_depth;
+        if (presetData.rail_color_name) document.getElementById('rail_material_name_multi').value = presetData.rail_color_name;
+        if (presetData.hasOwnProperty('split_rails')) document.getElementById('split_rails_multi').checked = presetData.split_rails;
+        
+        // Advanced settings
+        if (presetData.hasOwnProperty('synchronize_patterns')) document.getElementById('synchronize_patterns').checked = presetData.synchronize_patterns;
+        if (presetData.hasOwnProperty('force_horizontal_layout')) document.getElementById('force_horizontal').checked = presetData.force_horizontal_layout;
+        if (presetData.hasOwnProperty('preserve_corners')) document.getElementById('preserve_corners').checked = presetData.preserve_corners;
+        if (presetData.hasOwnProperty('use_flat_grouping')) document.getElementById('use_flat_grouping').checked = presetData.use_flat_grouping;
+        
+        // Minimum piece length
+        if (presetData.min_piece_length) document.getElementById('min_piece_length').value = presetData.min_piece_length;
+    }
+</script>
+</body>
+</html>
+    HTML
+    
+    dialog = UI::HtmlDialog.new({
+      :dialog_title => "PARAMETRIX-NEWUI Configuration",
+      :preferences_key => "com.parametrix.newui.layout",
+      :scrollable => false,
+      :resizable => false,
+      :width => 520,
+      :height => 650, 
+      :left => 100,
+      :top => 100,
+      :style => UI::HtmlDialog::STYLE_DIALOG
+    })
+    
+    dialog.set_html(html)
+    
+    dialog.add_action_callback("apply_settings") { |action_context, json_string|
+      settings = JSON.parse(json_string)
+      
+      # Multi-Row Settings
+      @@length = settings["length"]
+      @@height = settings["height"]
+      @@thickness = settings["thickness"]
+      @@joint_length = settings["joint_length"]
+      @@joint_width = settings["joint_width"]
+      @@cavity_distance = settings["cavity_distance"]
+      @@pattern_type = settings["pattern_type"]
+      @@layout_start_direction = settings["layout_start"]
+      @@start_row_height_index = settings["height_index"]
+      @@color_name = settings["material_name"]
+      @@randomize_lengths = settings["randomize_lengths"]
+      @@randomize_heights = settings["randomize_heights"]
+
+      # Single-Row Settings (use same UI values when in single-row mode)
+      @@single_row_length = settings["length"]
+      @@single_row_height = settings["height"]
+      @@single_row_thickness = settings["thickness"]
+      @@single_row_joint_length = settings["joint_length"]
+      @@single_row_joint_width = settings["joint_width"]
+      @@single_row_cavity_distance = settings["cavity_distance"]
+      @@single_row_pattern_type = settings["pattern_type"]
+      @@single_row_randomize_lengths = settings["randomize_lengths"]
+      
+      # Rail Settings
+      @@enable_top_rail = settings["enable_top_rail"]
+      @@top_rail_thickness = settings["top_rail_thickness"]
+      @@top_rail_depth = settings["top_rail_depth"]
+      @@enable_bottom_rail = settings["enable_bottom_rail"]
+      @@bottom_rail_thickness = settings["bottom_rail_thickness"]
+      @@bottom_rail_depth = settings["bottom_rail_depth"]
+      @@enable_left_rail = settings["enable_left_rail"]
+      @@left_rail_thickness = settings["left_rail_thickness"]
+      @@left_rail_depth = settings["left_rail_depth"]
+      @@enable_right_rail = settings["enable_right_rail"]
+      @@right_rail_thickness = settings["right_rail_thickness"]
+      @@right_rail_depth = settings["right_rail_depth"]
+      @@rail_color_name = settings["rail_material_name"]
+      @@split_rails = settings["split_rails"]
+      
+      # Advanced Settings
+      @@synchronize_patterns = settings["synchronize_patterns"]
+      @@force_horizontal_layout = settings["force_horizontal"]
+      @@preserve_corners = settings["preserve_corners"]
+      @@use_flat_grouping = settings["use_flat_grouping"]
+      @@single_row_mode = settings["single_row_mode"]
+      
+      # Minimum piece length settings
+      min_piece_value = settings["min_piece_length"] || 0
+      @@enable_min_piece_length = min_piece_value > 0
+      @@min_piece_length = min_piece_value
+      
+      is_preview = settings["preview"] || false
+      
+      if is_preview
+        # Preview mode: don't close dialog, remove previous preview
+        remove_preview
+        result = create_multi_face_unified_layout(multi_face_position, 0, { preview: true })
+      else
+        # Generate mode: close dialog, create final layout
+        dialog.close
+        remove_preview
+        result = create_multi_face_unified_layout(multi_face_position, 0, { preview: false })
+      end
+      
+      if result == 0
+        UI.messagebox("Layout creation failed. Check console for details.")
+      end
+    }
+    
+    # Preset management callbacks
+    dialog.add_action_callback("save_preset") { |action_context, name, json_string|
+      settings = JSON.parse(json_string)
+      success = PresetManager.save_preset(name, settings)
+      if success
+        # Refresh the preset list in the UI
+        dialog.execute_script("sketchup.get_user_presets();")
+      else
+        dialog.execute_script("alert('Failed to save preset. Check console for details.')")
+      end
+    }
+    
+    dialog.add_action_callback("load_preset") { |action_context, name|
+      preset_data = PresetManager.load_preset(name)
+      if preset_data
+        PresetManager.apply_preset_to_globals(preset_data)
+        dialog.execute_script("applyPresetToUI(#{preset_data.to_json})")
+      else
+        dialog.execute_script("alert('Failed to load preset: #{name}')")
+      end
+    }
+    
+    dialog.add_action_callback("get_user_presets") { |action_context|
+      presets = PresetManager.list_presets
+      
+      # Optimized script to clear and repopulate the dropdown
+      presets_json = presets.to_json
+      script = "
+        var presets = #{presets_json};
+        var dropdown = document.getElementById('preset_dropdown');
+        var current_value = dropdown.value;
+        
+        // Clear all options except the placeholder
+        while (dropdown.options.length > 1) {
+          dropdown.remove(1);
+        }
+        
+        // Add all presets from the authoritative list
+        presets.forEach(function(presetName) {
+          var option = document.createElement('option');
+          option.value = presetName;
+          option.textContent = presetName;
+          dropdown.appendChild(option);
+        });
+        
+        // Restore selection if it still exists
+        if (presets.includes(current_value)) {
+          dropdown.value = current_value;
+        }
+      "
+      dialog.execute_script(script)
+    }
+    
+    dialog.add_action_callback("delete_preset") { |action_context, name|
+      success = PresetManager.delete_preset(name)
+      if success
+        dialog.execute_script("document.getElementById('preset_dropdown').value = ''; sketchup.get_user_presets();")
+      else
+        dialog.execute_script("alert('Cannot delete this preset')")
+      end
+    }
+    
+    dialog.add_action_callback("open_documentation") { |action_context|
+      extension_dir = File.dirname(File.dirname(File.dirname(__FILE__)))
+      doc_path = File.join(extension_dir, "PARAMETRIX_Documentation.html")
+      if File.exist?(doc_path)
+        UI.openURL("file:///#{doc_path.gsub('\\', '/')}")
+      else
+        UI.messagebox("Documentation file not found at: #{doc_path}")
+      end
+    }
+    
+    dialog.set_on_closed {
+      puts "[PARAMETRIX P-24] Dialog closed - removing preview"
+      remove_preview
+    }
+
+    
+    dialog.show
+    
+    dialog.execute_script("sketchup.get_user_presets();")
+  end
+
+end
+

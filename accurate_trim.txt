@@ -1,3 +1,40 @@
+# Accurate Layout Trimming Process
+
+This document outlines a process for accurately trimming layouts, particularly focusing on using solid groups and components.
+
+the manual test i did and succeeded is below, u should analyze the process and the code, and implement the required process automated steps in the extension workflow instead, the test process is:
+
+
+## Generating the Layout
+
+First, a face is identified or created for which a layout needs to be generated. The process involves generating the layout, often using a "flat group" option within a dialog box.
+
+## Preparing the Cutter Group
+
+The core of this method relies on using a "cutter group."
+1.  **Create a Solid Group:** Any face can be used. This face is then push-pulled and grouped to ensure it is a "solid group" or "solid component."
+2.  **Cutter Requirements:** It's crucial that this cutter group is *not* a non-solid or manifold object; it must be a fully solid entity.
+3.  **Positioning:** The cutter group is moved to overlap or pass through the layout that needs trimming.
+
+## Executing the Trimming Script
+
+The process then involves selecting both the layout (which should also be a solid group or component) and the prepared cutter solid group.
+1.  **Run the Script:** A custom script (provided in the extension directory) is executed. This script's logic replaces a less effective, existing method.
+2.  **Accurate Trim:** The script accurately trims the layout according to the precise shape of the cutter. This method supports various cutter shapes, including circles, rectangles, and any other solid group shape.
+
+## Post-Trimming Cleanup
+
+After the script has trimmed the layout:
+1.  **Remove Cutter:** The push-pulled face (the cutter) is no longer needed and can be moved or deleted.
+2.  **Clean Leftovers:** Any internal elements or "leftovers" from the trimming process that are within the original boundaries of the layout but were not automatically deleted by the trim (because they were inside the cutter's volume) must be manually selected and deleted.
+
+## Verification of Results
+
+The final result is a trimmed layout solid group with accurate openings that are customized according to the cutter. It is essential to verify the entity info to confirm that the resulting groups are solid, ensuring no corrupted or non-manifold geometry remains. This entire process aims to achieve seamless and accurate functionality within the extension.
+
+
+the code:
+
 # Get the active model and selection
 model = Sketchup.active_model
 selection = model.selection

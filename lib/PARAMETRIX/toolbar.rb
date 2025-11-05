@@ -4,9 +4,9 @@ begin
   if defined?(PARAMETRIX)
     toolbar = UI::Toolbar.new "PARAMETRIX"
     
-    cmd = UI::Command.new("PARAMETRIX P-11 Layout Generator") {
+    cmd = UI::Command.new("PARAMETRIX P-24 Layout Generator") {
       begin
-        puts "[PARAMETRIX P-11] Toolbar command executed"
+        puts "[PARAMETRIX P-24] Toolbar command executed"
         PARAMETRIX.start_layout_process
       rescue => e
         UI.messagebox("Error: #{e.message}")
@@ -30,9 +30,9 @@ if defined?(cmd)
   
   cmd.small_icon = small_icon_path if File.exist?(small_icon_path)
   cmd.large_icon = large_icon_path if File.exist?(large_icon_path)
-  cmd.menu_text = "PARAMETRIX P-11 Layout Generator"
-  cmd.tooltip = "Generate parametric cladding layouts with advanced trimming P-11"
-  cmd.status_bar_text = "Generate PARAMETRIX P-11 cladding layout"
+  cmd.menu_text = "PARAMETRIX P-24 Layout Generator"
+  cmd.tooltip = "Generate parametric cladding layouts with advanced trimming P-24"
+  cmd.status_bar_text = "Generate PARAMETRIX P-24 cladding layout"
   
   toolbar.add_item cmd
   toolbar.show

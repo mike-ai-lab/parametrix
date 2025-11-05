@@ -67,9 +67,8 @@ module PARAMETRIX_TRIMMING
 
       faces_to_remove = []
       layout_ents.grep(Sketchup::Face).each do |f|
-        # Classify the center point of each face against the boundary
-        # If PointOutside, the face is outside the boundary and should be removed
-        if boundary_face.classify_point(f.bounds.center) == Sketchup::Face::PointOutside
+        # Use robust point-in-polygon check instead of unreliable PointOutside
+        unless self.is_point_inside_face_with_holes(boundary_face, f.bounds.center.transform(gp.transformation.inverse))
           faces_to_remove << f
         end
       end
@@ -128,6 +127,44 @@ module PARAMETRIX_TRIMMING
     end
 
     gents.erase_entities(faces2go) # Remove internal faces (holes)
+  end
+
+  # Robust point-in-face check that handles holes properly
+  def self.is_point_inside_face_with_holes(face, local_point)
+    # Check against outer boundary
+    outer_loop = face.outer_loop
+    return false unless self.is_point_in_loop(outer_loop, local_point)
+    
+    # Check against inner loops (holes) - point must NOT be inside any hole
+    face.loops.each do |loop|
+      next if loop == outer_loop
+      return false if self.is_point_in_loop(loop, local_point)
+    end
+    
+    true
+  end
+
+  # Ray casting algorithm for point-in-polygon
+  def self.is_point_in_loop(loop, local_point)
+    point = local_point.to_a
+    vertices = loop.vertices.map { |v| v.position.to_a }
+    x, y = point[0], point[1]
+    
+    inside = false
+    j = vertices.length - 1
+    
+    vertices.each_with_index do |vertex, i|
+      xi, yi = vertex[0], vertex[1]
+      xj, yj = vertices[j][0], vertices[j][1]
+      
+      if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+        inside = !inside
+      end
+      
+      j = i
+    end
+    
+    inside
   end
 
 end

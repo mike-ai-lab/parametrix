@@ -2,10 +2,10 @@
 
 module PARAMETRIX
 
-  PARAMETRIX_COMMANDS_VERSION = "P-11"
+  PARAMETRIX_COMMANDS_VERSION = "P-24"
 
   def self.start_layout_process
-    puts "[PARAMETRIX P-11] Starting layout process..."
+    puts "[PARAMETRIX P-24] Starting layout process..."
     model = Sketchup.active_model
     selection = model.selection
 

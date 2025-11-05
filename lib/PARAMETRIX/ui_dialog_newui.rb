@@ -218,8 +218,8 @@ module PARAMETRIX
             </div>
         </div>
 
-        <div class="dialog-title">PARAMETRIX P-11</div>
-        <div style="text-align: center; font-size: 10px; color: #9ca3af; opacity: 0.6; margin-top: -10px; margin-bottom: 15px;">P-11 | Developed by: Int. Arch. M.Shkeir</div>
+        <div class="dialog-title">PARAMETRIX P-24</div>
+        <div style="text-align: center; font-size: 10px; color: #9ca3af; opacity: 0.6; margin-top: -10px; margin-bottom: 15px;">P-24 | Developed by: Int. Arch. M.Shkeir</div>
         
         <!-- Layout Tabs -->
         <div class="setting-group">
@@ -817,7 +817,7 @@ module PARAMETRIX
     }
     
     dialog.set_on_closed {
-      puts "[PARAMETRIX P-11] Dialog closed - removing preview"
+      puts "[PARAMETRIX P-24] Dialog closed - removing preview"
       remove_preview
     }
 
