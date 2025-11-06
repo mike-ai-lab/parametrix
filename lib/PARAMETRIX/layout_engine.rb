@@ -17,13 +17,15 @@ module PARAMETRIX
     face_type = vertex_count == 4 ? "RECTANGULAR" : "COMPLEX (#{vertex_count} sides)"
     
 
+    # Always create proper groups for solid geometry
     if @@use_flat_grouping
-      # Create pieces directly in layout_group for flat structure
-      face_group = layout_group
+      # Create separate group for each face to avoid corner overlaps
+      face_group = layout_group.entities.add_group
+      face_group.name = is_preview ? "Preview_Face_#{face_index + 1}" : "PARAMETRIX_Face_#{face_index + 1}_Layout"
     else
       # Original nested structure
       face_group = layout_group.entities.add_group
-      face_group.name = "Face_#{face_index + 1}_Unified_#{corner_type.capitalize}"
+      face_group.name = is_preview ? "Preview_Face_#{face_index + 1}" : "PARAMETRIX_Face_#{face_index + 1}_Layout"
     end
 
     element_count = 0
@@ -277,10 +279,12 @@ module PARAMETRIX
       end
     end
     
-    if !is_preview
-      trimmed_result = PARAMETRIX_TRIMMING.boolean2d_exact(face_group, face, face_matrix)
-      face_group = trimmed_result if trimmed_result
-    end
+    # Skip boolean trimming for final layouts to preserve solid geometry
+    # Trimming breaks 3D solids by creating open boundaries
+    # if !is_preview
+    #   trimmed_result = PARAMETRIX_TRIMMING.boolean2d_exact(face_group, face, face_matrix)
+    #   face_group = trimmed_result if trimmed_result
+    # end
     
     # Create rails
     rail_material = materials.length > 1 ? materials[1] : materials[0]
@@ -296,9 +300,10 @@ module PARAMETRIX
     unit_name = get_effective_unit
 
 
-    # Make groups solid if not preview
-    if !is_preview && face_group.respond_to?(:entities) && face_group.valid? && face_group.entities.length > 0
-      face_group.entities.each { |e| e.make_unique if e.respond_to?(:make_unique) }
+    # Always make groups clean solids (both preview and final)
+    if face_group.respond_to?(:entities) && face_group.valid? && face_group.entities.length > 0
+      ensure_clean_solid_group(face_group)
+      face_group.name = is_preview ? "Preview_Face_#{face_index + 1}" : "PARAMETRIX_Face_#{face_index + 1}_Solid"
     end
     
     return { elements: element_count, trimmed: trimmed_count, group: face_group, rails: rails_group }

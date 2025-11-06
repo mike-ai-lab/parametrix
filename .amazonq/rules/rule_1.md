@@ -1,75 +1,89 @@
-developer-focused rule set 
+
+## PARAMETRIX – Loader & Update Rules (Finalized)
+
+### 1. Unique Identifier Policy
+
+* Every new update of the extension **must include a unique identifier**:
+  `P-(next version number)`
+  Example: if the last version folder is `P-4`, the next is `P-5`.
+* The identifier appears in:
+
+  * Menu item
+  * Dialog titles
+  * Console logs
+* The loader **must** be updated to match the current identifier.
+* No need to create random folders or timestamps—just increment the number properly.
 
 ---
 
-### Optimized Loader & Update Rules
+### 2. Loader Behavior
 
-**1. Unique Identifier Policy**
+* Clear **previously cached modules** to prevent SketchUp from using old code.
+* After loading, automatically update:
 
-* Every update **must** include a unique identifier to avoid conflicts with versioning.
-* The unique identifier is appended to:
+  * Plugin menu item
+  * Toolbar
+* Existing features remain intact.
+  Bugs are fixed **directly**—never removed.
 
-  * Menu item name
-  * Dialog box title
-  * Console log messages
-* Format: `"P-5 <your_unique_id>"` (example: `"P-5 v1.2.3_20251105"`).
-* Do **not** skip the unique identifier, but do not create extra unnecessary files just to satisfy uniqueness.
+---
 
-**2. Loader Behavior**
+### 3. Console & Dialog Logging
 
-* Always **clear cached modules** to ensure the most recent code is loaded.
-* Automatically **update the menu item** and **toolbar** after loading.
-* Always retain existing features.
-* Always **fix broken behavior**, do **not** remove features as a shortcut.
+* All logs use the identifier so it is always clear which version is running.
+* Example:
+  `[PARAMETRIX P-5] Module loaded successfully.`
 
-**3. Console & Dialog Logging**
+---
 
-* Use the unique identifier in all logs and dialog boxes to track versions.
-* Example log: `[PARAMETRIX P-5 v1.2.3_20251105] Module loaded successfully.`
+### 4. Loader Command (SketchUp Ruby)
 
-**4. Loader Command (Ruby / SketchUp)**
+This is the finalized, corrected loader function.
+It takes the loader file path and the version identifier (e.g., `"P-5"`):
 
 ```ruby
-# Strong loader for Parametrix P-5 extension
-def load_parametrix(loader_path, unique_id)
-  model = Sketchup.active_model
-
-  # Clear previously loaded modules
+# Strong loader for Parametrix version P-X
+def load_parametrix(loader_path, version_id)
+  # Clear cached PARAMETRIX modules
   if defined?(PARAMETRIX)
     PARAMETRIX.constants.each { |c| PARAMETRIX.send(:remove_const, c) }
   end
 
-  # Force reload of the main extension file
+  # Reload the main extension file
   load loader_path
 
-  # Update menu & toolbar with unique identifier
-  menu_name = "P-5 #{unique_id}"
-  toolbar_name = "P-5 #{unique_id}"
-  
-  # Remove old menu if exists
-  UI.menu("Plugins").remove_item(menu_name) rescue nil
-  # Add new menu
-  UI.menu("Plugins").add_item(menu_name) { puts "[PARAMETRIX #{menu_name}] Activated." }
+  # Naming based on version
+  menu_name    = version_id
+  toolbar_name = version_id
 
-  # Update toolbar (simplified, for standard SketchUp toolbar)
+  # Refresh menu item
+  plugins_menu = UI.menu("Plugins")
+  plugins_menu.remove_item(menu_name) rescue nil
+  plugins_menu.add_item(menu_name) {
+    puts "[PARAMETRIX #{menu_name}] Menu activated."
+  }
+
+  # Refresh toolbar
   toolbar = UI::Toolbar.new(toolbar_name)
-  # Add commands or buttons as needed here
+  # Toolbar buttons can be re-added here if needed
   toolbar.show
 
-  # Log load confirmation
+  # Console confirmation
   puts "[PARAMETRIX #{menu_name}] Loader executed successfully."
 end
 
 # Example usage:
-# load_parametrix("C:/Users/mshke/Documents/Automations/PARAMETRIX_EXTENSION/parametrix_p5.rb", "v1.2.3_20251105")
+# load_parametrix("C:/Users/mshke/Documents/Automations/PARAMETRIX_EXTENSION/parametrix_p5.rb", "P-5")
 ```
 
-**5. Developer Notes**
-
-* Always append `unique_id` when creating or updating modules.
-* Never remove existing features; always fix problems in place.
-* Clearing constants ensures no old versions interfere with the update.
-* Menu and toolbar names include the unique identifier to track which version is loaded.
-* All these should be at the end of the task, never start with theme, always focis on the task from the user and when finishing it u proceed with the rules seamlessly without wasting time
 ---
 
+### 5. Developer Notes
+
+* Always increment the version properly: P-4 → P-5 → P-6 …
+* Always update the loader with the new identifier.
+* Always fix problems within the existing feature set.
+* Never drop features because a fix is hard—repair, don’t remove.
+* Clearing cached constants guarantees SketchUp loads the latest code.
+* Menu + Toolbar showing the identifier makes it easy to verify the loaded version.
+* Loader rules come **after completing the main task**, not before.

@@ -1,11 +1,13 @@
-# PARAMETRIX P-24 Strong Reload Command
+# PARAMETRIX P-5 v1.0.0_20250105 Strong Reload Command
+
+unique_id = "v1.0.0_20250105"
 
 puts "=" * 60
-puts "PARAMETRIX P-24 STRONG RELOAD INITIATED"
+puts "PARAMETRIX P-5 #{unique_id} STRONG RELOAD INITIATED"
 puts "=" * 60
 
 if defined?(PARAMETRIX)
-  puts "[P-24] Clearing existing PARAMETRIX module..."
+  puts "[P-5 #{unique_id}] Clearing existing PARAMETRIX module..."
   Object.send(:remove_const, :PARAMETRIX)
 end
 
@@ -14,5 +16,5 @@ $LOADED_FEATURES.delete_if { |f| f.include?("PARAMETRIX") || f.include?(extensio
 
 load File.join(extension_path, "PARAMETRIX.rb")
 
-puts "[P-24] PARAMETRIX P-24 loaded successfully!"
+puts "[PARAMETRIX P-5 #{unique_id}] Module loaded successfully."
 puts "=" * 60

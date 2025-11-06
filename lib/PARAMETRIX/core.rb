@@ -688,6 +688,26 @@ module PARAMETRIX
     materials_array
   end
 
+  def self.ensure_clean_solid_group(group)
+    return unless group && group.valid? && group.respond_to?(:entities)
+    
+    begin
+      # Apply materials to all faces for consistent appearance
+      group.entities.each do |entity|
+        if entity.is_a?(Sketchup::Face)
+          entity.material = entity.material || group.entities.parent.material
+          entity.back_material = entity.back_material || entity.material
+        end
+      end
+      
+      # Force group to be recognized as solid
+      group.entities.each { |e| e.make_unique if e.respond_to?(:make_unique) }
+      
+    rescue => e
+      puts "[PARAMETRIX P-24] Error ensuring solid group: #{e.message}"
+    end
+  end
+
   def self.remove_preview
     if @@preview_group
       model = Sketchup.active_model
@@ -703,40 +723,41 @@ module PARAMETRIX
 
   def self.create_piece_with_ghosting(face_group, world_points, materials, thickness_su, original_normal, piece_index, total_pieces, is_preview = false, original_face = nil, face_matrix = nil)
     begin
-      # Create individual solid group for each piece
-      piece_group = face_group.entities.add_group
-      face_element = piece_group.entities.add_face(world_points)
+      # Handle both group entities and direct entities
+      target_entities = face_group.respond_to?(:entities) ? face_group.entities : face_group
+      face_element = target_entities.add_face(world_points)
       
       if face_element
+        # Set material based on mode
         if is_preview
           face_element.material = "#CCCCCC"
           face_element.back_material = "#CCCCCC"
         else
           face_element.material = materials.first
           face_element.back_material = materials.first
+        end
 
-          if thickness_su > 0.001
-            layout_normal = face_element.normal
-            if layout_normal.samedirection?(original_normal)
-              pushpull_distance = -thickness_su
-            else
-              pushpull_distance = thickness_su
-            end
-            
-            # Pushpull to create solid
-            result = face_element.pushpull(pushpull_distance)
-            
-            # Ensure all faces have materials for solid appearance
-            piece_group.entities.each do |entity|
-              if entity.is_a?(Sketchup::Face)
-                entity.material = materials.first unless entity.material
-                entity.back_material = materials.first unless entity.back_material
-              end
+        # Always create 3D geometry for both preview and final
+        if thickness_su > 0.001
+          layout_normal = face_element.normal
+          if layout_normal.samedirection?(original_normal)
+            pushpull_distance = -thickness_su
+          else
+            pushpull_distance = thickness_su
+          end
+          
+          # Pushpull to create solid geometry
+          result = face_element.pushpull(pushpull_distance)
+          
+          # Apply preview material to all faces of the solid if preview
+          if is_preview && result
+            target_entities.grep(Sketchup::Face).each do |f|
+              f.material = "#CCCCCC"
+              f.back_material = "#CCCCCC"
             end
           end
         end
         
-        piece_group.name = "Piece_#{piece_index + 1}"
         return true
       end
     rescue => e
